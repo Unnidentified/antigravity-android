@@ -334,16 +334,15 @@ fun ChatDrawerSheet(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        if (quota.usedPercent != null) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            LinearProgressIndicator(
-                                progress = { (quota.usedPercent / 100f).coerceIn(0f, 1f) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(5.dp)
-                                    .clip(RoundedCornerShape(999.dp))
-                            )
-                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LinearProgressIndicator(
+                            progress = { ((quota.usedPercent ?: 0f) / 100f).coerceIn(0f, 1f) },
+                            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(5.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                        )
                     }
                 }
             }

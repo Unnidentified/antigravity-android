@@ -38,7 +38,26 @@ object MarkdownParser {
     private val ORDERED_REGEX = Regex("^\\s*(\\d+)[.)]\\s+(.+)$")
     private val TABLE_SEP_REGEX = Regex("^\\|?(\\s*:?-+:?\\s*\\|)+(\\s*:?-+:?\\s*)?\\|?$")
 
+    private val parseCache = object : LinkedHashMap<String, List<MarkdownBlock>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<MarkdownBlock>>?): Boolean {
+            return size > 64
+        }
+    }
+
     fun parse(markdown: String): List<MarkdownBlock> {
+        synchronized(parseCache) {
+            parseCache[markdown]?.let { return it }
+        }
+        val parsed = parseInternal(markdown)
+        if (markdown.length <= 24_000) {
+            synchronized(parseCache) {
+                parseCache[markdown] = parsed
+            }
+        }
+        return parsed
+    }
+
+    private fun parseInternal(markdown: String): List<MarkdownBlock> {
         val normalized = markdown.replace("\r\n", "\n").replace('\r', '\n')
         val lines = normalized.split('\n')
         val blocks = mutableListOf<MarkdownBlock>()

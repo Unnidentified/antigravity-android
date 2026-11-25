@@ -153,13 +153,22 @@ object BridgeStateParser {
             rawActiveModel
         }
 
+        val rawProject = SimpleJson.asString(root["activeProject"]).orEmpty().trim()
+        val cleanProject = if (rawProject.equals("No Project", ignoreCase = true) ||
+            rawProject.equals("Select project", ignoreCase = true)
+        ) {
+            ""
+        } else {
+            rawProject
+        }
+
         return BridgeSnapshot(
             currentUrl = SimpleJson.asString(root["url"]).orEmpty(),
             conversationTitle = normalizeConversationTitle(SimpleJson.asString(root["title"])),
             authRequired = SimpleJson.asBoolean(root["authRequired"]) == true,
             isStreaming = SimpleJson.asBoolean(root["isStreaming"]) == true,
             activeModelName = cleanActiveModel,
-            activeProject = SimpleJson.asString(root["activeProject"]).orEmpty().trim(),
+            activeProject = cleanProject,
             permissionsPreset = SimpleJson.asString(root["permissionsPreset"]).orEmpty().trim(),
             models = models,
             conversations = conversations,

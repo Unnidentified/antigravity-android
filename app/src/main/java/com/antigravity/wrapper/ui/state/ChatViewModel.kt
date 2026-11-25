@@ -165,6 +165,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 optimisticMessages = emptyList(),
+                optimisticModelLabel = null,
                 isSwitchingConversation = true
             )
         }

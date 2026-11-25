@@ -26,7 +26,12 @@ object CodeSyntaxHighlighter {
         "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "JOIN", "CREATE", "TABLE"
     )
 
+    private const val MAX_HIGHLIGHT_LENGTH = 4000
+
     fun highlight(code: String, darkTheme: Boolean): AnnotatedString {
+        if (code.length > MAX_HIGHLIGHT_LENGTH) {
+            return AnnotatedString(code)
+        }
         val keywordColor = if (darkTheme) Color(0xFFC792EA) else Color(0xFF7C3AED)
         val stringColor = if (darkTheme) Color(0xFFA5D6A7) else Color(0xFF15803D)
         val commentColor = if (darkTheme) Color(0xFF7F8694) else Color(0xFF6B7280)

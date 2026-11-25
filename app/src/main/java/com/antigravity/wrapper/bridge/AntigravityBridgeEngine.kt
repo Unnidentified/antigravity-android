@@ -121,18 +121,46 @@ class AntigravityBridgeEngine(
         )
     }
 
-    fun sendPrompt(text: String, onResult: (Boolean) -> Unit) {
+    private var pendingSendCallback: ((Boolean, String) -> Unit)? = null
+
+    fun sendPrompt(text: String, onResult: (Boolean, String) -> Unit) {
         val view = webView
         if (view == null) {
-            onResult(false)
+            onResult(false, "Session not ready")
             return
         }
+        pendingSendCallback = onResult
+
+        // Temporarily allow Chromium DOM focus (while keeping WebView invisible & untouchable)
+        // so Lexical/ProseMirror's contenteditable editor accepts selection + insertText/paste.
+        val wasInteractive = interactiveMode
+        if (!wasInteractive) {
+            view.isFocusable = true
+            view.isFocusableInTouchMode = true
+            view.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+            view.requestFocus()
+        }
+
         val escaped = AntigravityBridgeScript.escapeJsString(text)
         view.evaluateJavascript(
-            "window.__agBridge ? (window.__agBridge.sendPrompt(\"$escaped\"), true) : false;"
-        ) { raw ->
-            onResult(raw?.trim()?.equals("true", ignoreCase = true) == true)
-        }
+            "window.__agBridge ? window.__agBridge.sendPrompt(\"$escaped\") : false;",
+            null
+        )
+
+        // Safety timeout to always restore focus lock cleanly
+        mainHandler.postDelayed({
+            if (!interactiveMode) {
+                view.clearFocus()
+                view.isFocusable = false
+                view.isFocusableInTouchMode = false
+                view.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            }
+            val cb = pendingSendCallback
+            pendingSendCallback = null
+            if (cb != null) {
+                cb(true, "")
+            }
+        }, 1_100L)
     }
 
     fun stopGeneration() {
@@ -281,6 +309,22 @@ class AntigravityBridgeEngine(
                 mainHandler.post {
                     onSnapshotReceived(snapshot)
                 }
+            }
+        }
+
+        @JavascriptInterface
+        fun onPromptSendResult(ok: Boolean, reason: String?) {
+            mainHandler.post {
+                val view = webView
+                if (view != null && !interactiveMode) {
+                    view.clearFocus()
+                    view.isFocusable = false
+                    view.isFocusableInTouchMode = false
+                    view.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                }
+                val cb = pendingSendCallback
+                pendingSendCallback = null
+                cb?.invoke(ok, reason.orEmpty())
             }
         }
 
