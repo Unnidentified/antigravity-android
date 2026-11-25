@@ -11,12 +11,16 @@ object AntigravityBridgeScript {
 
     fun buildBootstrapScript(): String = """
         (function() {
-          if (window.__agBridge && window.__agBridge.version === 2) {
+          if (document.getElementById('af-error-container')) {
+            window.location.replace('https://antigravity.google.com/remote');
+            return;
+          }
+          if (window.__agBridge && window.__agBridge.version === 3) {
             window.__agBridge.syncNow();
             return;
           }
 
-          const BRIDGE_VERSION = 2;
+          const BRIDGE_VERSION = 3;
           let cachedModels = [];
           let cachedConversations = [];
           let syncTimer = null;
@@ -332,6 +336,15 @@ object AntigravityBridgeScript {
             document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
           }
 
+          function isNonChatHref(href) {
+            const path = (href || '').toLowerCase();
+            return !path || path.startsWith('#') ||
+              path.includes('/customizations') || path.includes('/settings') ||
+              path.includes('/plugins') || path.includes('/privacy') ||
+              path.includes('/terms') || path.includes('/help') ||
+              path.includes('/feedback') || path.includes('accounts.google.');
+          }
+
           function extractConversations() {
             const root = getAppRoot();
             const links = collectDeep(root, el => {
@@ -343,7 +356,10 @@ object AntigravityBridgeScript {
               }
               if (tag === 'a') {
                 const href = el.getAttribute('href') || '';
-                if (/\/(c|chat|conversation|session|thread|project|remote)/i.test(href)) return true;
+                if (isNonChatHref(href)) return false;
+                if (/^\/(c|chat|conversation|session|thread)\//i.test(href) || /^\/remote(\?|\/|$)/i.test(href)) {
+                  return true;
+                }
               }
               if ((role === 'listitem' || role === 'option' || role === 'treeitem') && el.closest && el.closest('nav, aside, [role="navigation"]')) {
                 return cleanText(el.textContent).length > 1;
@@ -702,22 +718,41 @@ object AntigravityBridgeScript {
               setTimeout(() => { lastPayloadHash = ''; syncNow(); }, 300);
               return true;
             }
-            window.location.href = 'https://antigravity.google.com';
+            window.location.href = 'https://antigravity.google.com/remote';
             return true;
           }
 
           function selectConversation(url, title) {
-            if (url && url.startsWith('https://')) {
-              window.location.href = url;
-              return true;
+            const root = getAppRoot();
+            if (url) {
+              const linkByHref = collectDeep(root, el => {
+                if ((el.tagName || '').toLowerCase() !== 'a') return false;
+                const h = el.getAttribute('href') || '';
+                try {
+                  return h && new URL(h, window.location.origin).href === url;
+                } catch (_) {
+                  return false;
+                }
+              }, 5)[0];
+              if (linkByHref) {
+                linkByHref.click();
+                setTimeout(() => { lastPayloadHash = ''; syncNow(); }, 350);
+                return true;
+              }
             }
-            const candidates = collectDeep(getAppRoot(), el => {
-              const txt = cleanText(el.textContent);
-              return txt && txt.toLowerCase().includes((title || '').toLowerCase());
-            }, 30);
-            if (candidates.length > 0) {
-              candidates[candidates.length - 1].click();
-              setTimeout(() => { lastPayloadHash = ''; syncNow(); }, 300);
+            if (title) {
+              const candidates = collectDeep(root, el => {
+                const txt = cleanText(el.textContent);
+                return txt && txt.toLowerCase().includes(title.toLowerCase());
+              }, 30);
+              if (candidates.length > 0) {
+                candidates[candidates.length - 1].click();
+                setTimeout(() => { lastPayloadHash = ''; syncNow(); }, 350);
+                return true;
+              }
+            }
+            if (url && url.startsWith('https://antigravity.google.com/remote')) {
+              window.location.href = url;
               return true;
             }
             return false;
@@ -840,6 +875,14 @@ object AntigravityBridgeScript {
           syncNow();
           setTimeout(syncNow, 900);
           setTimeout(syncNow, 2200);
+          let hydrateTicks = 0;
+          const hydrateInterval = setInterval(() => {
+            hydrateTicks++;
+            syncNow();
+            if (hydrateTicks >= 6 || document.querySelector('[data-testid="mobile-layout"]')) {
+              clearInterval(hydrateInterval);
+            }
+          }, 2000);
         })();
     """.trimIndent()
 
