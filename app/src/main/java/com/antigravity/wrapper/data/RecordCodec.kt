@@ -2,66 +2,11 @@ package com.antigravity.wrapper.data
 
 /**
  * Lightweight, dependency-free record codec safe for pure JVM unit tests and R8 minification.
- * Escapes control characters so arbitrary titles, URLs, and multi-line prompts round-trip cleanly.
  */
 object RecordCodec {
 
     private const val FIELD_SEP = '\u001F'
     private const val RECORD_SEP = '\u001E'
-
-    fun encodeBookmarks(items: List<BookmarkItem>): String {
-        return items.joinToString(RECORD_SEP.toString()) { item ->
-            listOf(
-                escape(item.id),
-                escape(item.title),
-                escape(item.url),
-                item.createdAtMillis.toString(),
-                item.pinned.toString()
-            ).joinToString(FIELD_SEP.toString())
-        }
-    }
-
-    fun decodeBookmarks(raw: String?): List<BookmarkItem> {
-        if (raw.isNullOrEmpty()) return emptyList()
-        return raw.split(RECORD_SEP).mapNotNull { record ->
-            val parts = record.split(FIELD_SEP)
-            if (parts.size < 4) return@mapNotNull null
-            BookmarkItem(
-                id = unescape(parts[0]),
-                title = unescape(parts[1]),
-                url = unescape(parts[2]),
-                createdAtMillis = parts[3].toLongOrNull() ?: 0L,
-                pinned = parts.getOrNull(4)?.toBooleanStrictOrNull() ?: false
-            )
-        }
-    }
-
-    fun encodeDownloads(items: List<DownloadRecord>): String {
-        return items.joinToString(RECORD_SEP.toString()) { item ->
-            listOf(
-                item.id.toString(),
-                escape(item.fileName),
-                escape(item.url),
-                escape(item.mimeType),
-                item.downloadedAtMillis.toString()
-            ).joinToString(FIELD_SEP.toString())
-        }
-    }
-
-    fun decodeDownloads(raw: String?): List<DownloadRecord> {
-        if (raw.isNullOrEmpty()) return emptyList()
-        return raw.split(RECORD_SEP).mapNotNull { record ->
-            val parts = record.split(FIELD_SEP)
-            if (parts.size < 5) return@mapNotNull null
-            DownloadRecord(
-                id = parts[0].toLongOrNull() ?: return@mapNotNull null,
-                fileName = unescape(parts[1]),
-                url = unescape(parts[2]),
-                mimeType = unescape(parts[3]),
-                downloadedAtMillis = parts[4].toLongOrNull() ?: 0L
-            )
-        }
-    }
 
     fun encodePrompts(items: List<QuickPrompt>): String {
         return items.joinToString(RECORD_SEP.toString()) { item ->

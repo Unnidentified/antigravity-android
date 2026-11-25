@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -72,14 +72,16 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          NOTES="Native Jetpack Compose & Material 3 build of Antigravity for Android (${TAG}).
+          NOTES="End-to-end native Jetpack Compose & Material 3 build of Antigravity for Android (${TAG}).
 
           ### Highlights
-          - Material 3 native navigation (Workspace, Saved, Downloads, Settings) with Material You dynamic colors, Dark, AMOLED Black, and Light themes
-          - Branded navigation drawer with pinned bookmarks & quick tools
-          - Quick Actions & reusable Quick Prompts bottom sheet with direct input insertion
-          - Integrated Find in Page, live text zoom slider, mobile UI polish, desktop viewport toggle, focus mode, haptics, and native Downloads manager
-          - Full Google OAuth compatibility, file uploads, authenticated downloads, and Chrome Custom Tabs for external links
+          - 100% native chat interface (zero browser chrome or visible web UI during normal use) backed by a headless session bridge
+          - Native chat menu drawer with New Chat, conversation search, and synced conversations
+          - Native prompt input bar with attachments, clickable Model Selector sheet, Quick Prompts, and Send/Stop controls
+          - Native Usage & Quota ring indicator and bottom sheet
+          - Collapsible & expandable reasoning/thought cards
+          - Native Markdown + syntax-highlighted code blocks + native Compose LaTeX math renderer (fractions, roots, scripts, matrices)
+          - Settings with System/Dark/AMOLED/Light + Material You themes and 1-tap Sanitized DOM Snapshot exporter for bridge calibration
 
           Built and verified automatically via GitHub Actions (\`./gradlew testDebugUnitTest assembleDebug\`)."
 

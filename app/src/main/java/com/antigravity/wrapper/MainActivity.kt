@@ -1,7 +1,6 @@
 package com.antigravity.wrapper
 
 import android.Manifest
-import android.app.DownloadManager
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -13,7 +12,6 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
-import android.view.View
 import android.view.WindowManager
 import android.webkit.MimeTypeMap
 import android.webkit.PermissionRequest
@@ -29,35 +27,29 @@ import androidx.activity.viewModels
 import androidx.browser.customtabs.CustomTabColorSchemeParams
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
-import com.antigravity.wrapper.data.AppDestination
+import com.antigravity.wrapper.bridge.AntigravityBridgeEngine
 import com.antigravity.wrapper.data.ThemeMode
-import com.antigravity.wrapper.ui.AntigravityApp
-import com.antigravity.wrapper.ui.state.MainViewModel
+import com.antigravity.wrapper.ui.AntigravityNativeApp
+import com.antigravity.wrapper.ui.state.ChatViewModel
 import com.antigravity.wrapper.web.AntigravityWebChromeClient
 import com.antigravity.wrapper.web.AntigravityWebViewClient
 import com.antigravity.wrapper.web.DownloadHandler
 import com.antigravity.wrapper.web.UrlRouter
-import com.antigravity.wrapper.web.WebViewController
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
-    private val viewModel: MainViewModel by viewModels()
-    private val webViewController = WebViewController()
+    private val viewModel: ChatViewModel by viewModels()
     private val snackbarHostState = SnackbarHostState()
+
+    private lateinit var bridgeEngine: AntigravityBridgeEngine
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var pendingWebPermissionRequest: PermissionRequest? = null
     private var isSplashReleased = false
-
-    private var fullscreenWebView by mutableStateOf<View?>(null)
-    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
 
     private val openDocumentsLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -85,36 +77,32 @@ class MainActivity : ComponentActivity() {
         splashScreen.setKeepOnScreenCondition { !isSplashReleased }
         window.decorView.postDelayed({ isSplashReleased = true }, SPLASH_MAX_HOLD_MS)
 
+        bridgeEngine = AntigravityBridgeEngine(
+            onSnapshotReceived = { snapshot ->
+                isSplashReleased = true
+                viewModel.onBridgeSnapshot(snapshot)
+            }
+        )
+
         configureSystemBars(isDark = true)
         setupBackNavigation()
 
         val initialUrl = extractAllowedDeepLink(intent) ?: UrlRouter.START_URL
 
         setContent {
-            AntigravityApp(
+            AntigravityNativeApp(
                 viewModel = viewModel,
-                webViewController = webViewController,
+                bridgeEngine = bridgeEngine,
                 snackbarHostState = snackbarHostState,
                 initialUrl = initialUrl,
-                fullscreenWebView = fullscreenWebView,
                 onConfigureSystemBars = { isDark -> configureSystemBars(isDark) },
                 onKeepScreenAwakeChanged = { keepAwake -> updateKeepScreenAwake(keepAwake) },
                 onBuildWebViewClient = { buildWebViewClient() },
                 onBuildWebChromeClient = { buildWebChromeClient() },
                 onBuildDownloadHandler = { buildDownloadHandler() },
-                onShareUrl = { title, url -> shareCurrentPage(title, url) },
                 onCopyToClipboard = { label, text -> copyToClipboard(label, text) },
-                onOpenExternalUrl = { url -> openInCustomTabsOrBrowser(url) },
-                onOpenSystemDownloads = { openSystemDownloads() },
-                onWebViewCreated = {
-                    val settings = viewModel.settings.value
-                    val darkEffective = isDarkForMode(settings.themeMode)
-                    webViewController.applySettings(
-                        settings = settings,
-                        isDarkEffective = darkEffective,
-                        reloadIfViewportChanged = false
-                    )
-                }
+                onShareText = { text -> shareText(text) },
+                onOpenExternalUrl = { url -> openInCustomTabsOrBrowser(url) }
             )
         }
     }
@@ -124,9 +112,7 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         val deepLink = extractAllowedDeepLink(intent)
         if (deepLink != null) {
-            viewModel.clearError()
-            viewModel.selectDestination(AppDestination.WORKSPACE)
-            webViewController.loadUrl(deepLink)
+            bridgeEngine.reload(deepLink)
         }
     }
 
@@ -162,29 +148,31 @@ class MainActivity : ComponentActivity() {
     private fun buildWebViewClient(): AntigravityWebViewClient {
         return AntigravityWebViewClient(
             onPageStartedCallback = { url ->
-                viewModel.onPageStarted(url)
+                if (isGoogleAuthUrl(url)) {
+                    isSplashReleased = true
+                    viewModel.onBridgeNavigatingToAuth()
+                }
             },
             onPageFinishedCallback = { url, hadMainFrameError ->
                 isSplashReleased = true
-                webViewController.setRefreshing(false)
-                viewModel.onPageFinished(url, hadMainFrameError)
                 if (!hadMainFrameError) {
-                    val settings = viewModel.settings.value
-                    webViewController.injectMobilePolish(
-                        settings = settings,
-                        isDarkEffective = isDarkForMode(settings.themeMode)
-                    )
+                    if (isGoogleAuthUrl(url)) {
+                        viewModel.onBridgeNavigatingToAuth()
+                    } else {
+                        bridgeEngine.injectBridgeScript()
+                    }
                 }
             },
-            onNavigationStateChanged = { url, canGoBack, canGoForward ->
-                viewModel.onNavigationStateChanged(url, canGoBack, canGoForward)
+            onNavigationStateChanged = { url, _, _ ->
+                if (isGoogleAuthUrl(url)) {
+                    viewModel.onBridgeNavigatingToAuth()
+                } else {
+                    bridgeEngine.injectBridgeScript()
+                }
             },
-            onMainFrameErrorCallback = { failedUrl, errorCode, description ->
+            onMainFrameErrorCallback = { _, _, description ->
                 isSplashReleased = true
-                webViewController.setRefreshing(false)
-                viewModel.onMainFrameError(
-                    failedUrl = failedUrl,
-                    errorCode = errorCode,
+                viewModel.onBridgeError(
                     description = description,
                     isOffline = !isNetworkAvailable()
                 )
@@ -196,16 +184,8 @@ class MainActivity : ComponentActivity() {
 
     private fun buildWebChromeClient(): AntigravityWebChromeClient {
         return AntigravityWebChromeClient(
-            onProgressUpdate = { progress ->
-                viewModel.onProgressChanged(progress)
-                if (progress >= 100) {
-                    isSplashReleased = true
-                    webViewController.setRefreshing(false)
-                }
-            },
-            onTitleChanged = { title ->
-                viewModel.onTitleChanged(title)
-            },
+            onProgressUpdate = { _ -> },
+            onTitleChanged = { _ -> },
             onFileChooserRequested = { callback, params ->
                 handleShowFileChooser(callback, params)
             },
@@ -217,28 +197,26 @@ class MainActivity : ComponentActivity() {
                     pendingWebPermissionRequest = null
                 }
             },
-            onPopupUrlResolved = { url ->
-                handlePopupUrl(url)
-            },
-            onEnterFullscreen = { view, callback ->
-                enterFullscreenView(view, callback)
-            },
-            onExitFullscreen = {
-                exitFullscreenView()
-            }
+            onPopupUrlResolved = { url -> handlePopupUrl(url) },
+            onEnterFullscreen = { _, callback -> callback.onCustomViewHidden() },
+            onExitFullscreen = {}
         )
     }
 
     private fun buildDownloadHandler(): DownloadHandler {
         return DownloadHandler(
             context = this,
-            onDownloadRecorded = { id, fileName, url, mimeType ->
-                viewModel.recordDownload(id, fileName, url, mimeType)
-            },
-            onMessage = { message ->
-                showSnackbar(message)
-            }
+            onDownloadRecorded = { _, _, _, _ -> },
+            onMessage = { message -> showSnackbar(message) }
         )
+    }
+
+    private fun isGoogleAuthUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        val lower = url.lowercase()
+        return lower.contains("accounts.google.") ||
+            lower.contains("signin.google.") ||
+            lower.contains("consent.google.")
     }
 
     private fun setupBackNavigation() {
@@ -247,21 +225,13 @@ class MainActivity : ComponentActivity() {
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
                     val state = viewModel.uiState.value
+                    val settings = viewModel.settings.value
                     when {
-                        fullscreenWebView != null -> exitFullscreenView()
-                        state.isQuickActionsOpen -> viewModel.setQuickActionsOpen(false)
-                        state.isFindBarOpen -> {
-                            viewModel.setFindBarOpen(false)
-                            webViewController.clearFind()
-                        }
-                        state.activeDestination != AppDestination.WORKSPACE -> {
-                            viewModel.selectDestination(AppDestination.WORKSPACE)
-                        }
-                        state.isImmersiveMode -> viewModel.setImmersiveMode(false)
-                        webViewController.canGoBack() -> {
-                            viewModel.clearError()
-                            webViewController.goBack()
-                        }
+                        settings.webInspectorMode -> viewModel.setWebInspectorMode(false)
+                        state.isModelSheetOpen -> viewModel.setModelSheetOpen(false)
+                        state.isQuotaSheetOpen -> viewModel.setQuotaSheetOpen(false)
+                        state.isQuickPromptsSheetOpen -> viewModel.setQuickPromptsSheetOpen(false)
+                        state.isSettingsSheetOpen -> viewModel.setSettingsSheetOpen(false)
                         else -> {
                             isEnabled = false
                             onBackPressedDispatcher.onBackPressed()
@@ -302,10 +272,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun resolveAcceptMimeTypes(acceptTypes: Array<String>?): Array<String> {
-        if (acceptTypes.isNullOrEmpty()) {
-            return arrayOf("*/*")
-        }
-
+        if (acceptTypes.isNullOrEmpty()) return arrayOf("*/*")
         val mimeMap = MimeTypeMap.getSingleton()
         val resolved = acceptTypes
             .flatMap { it.split(",") }
@@ -320,12 +287,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             .distinct()
-
-        return if (resolved.isEmpty() || resolved.contains("*/*")) {
-            arrayOf("*/*")
-        } else {
-            resolved.toTypedArray()
-        }
+        return if (resolved.isEmpty() || resolved.contains("*/*")) arrayOf("*/*") else resolved.toTypedArray()
     }
 
     private fun handleWebPermissionRequest(request: PermissionRequest) {
@@ -334,38 +296,34 @@ class MainActivity : ComponentActivity() {
                 request.deny()
                 return@runOnUiThread
             }
-
             if (!UrlRouter.isTrustedPermissionOrigin(request.origin?.toString())) {
                 request.deny()
                 return@runOnUiThread
             }
-
             val requestedResources = request.resources ?: emptyArray()
             if (requestedResources.isEmpty()) {
                 request.deny()
                 return@runOnUiThread
             }
-
-            val neededAndroidPermissions = mutableListOf<String>()
+            val neededPermissions = mutableListOf<String>()
             if (PermissionRequest.RESOURCE_VIDEO_CAPTURE in requestedResources &&
                 ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
                 PackageManager.PERMISSION_GRANTED
             ) {
-                neededAndroidPermissions.add(Manifest.permission.CAMERA)
+                neededPermissions.add(Manifest.permission.CAMERA)
             }
             if (PermissionRequest.RESOURCE_AUDIO_CAPTURE in requestedResources &&
                 ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
                 PackageManager.PERMISSION_GRANTED
             ) {
-                neededAndroidPermissions.add(Manifest.permission.RECORD_AUDIO)
+                neededPermissions.add(Manifest.permission.RECORD_AUDIO)
             }
-
-            if (neededAndroidPermissions.isEmpty()) {
+            if (neededPermissions.isEmpty()) {
                 resolveWebPermissionRequest(request, emptyMap())
             } else {
                 pendingWebPermissionRequest?.deny()
                 pendingWebPermissionRequest = request
-                runtimePermissionLauncher.launch(neededAndroidPermissions.toTypedArray())
+                runtimePermissionLauncher.launch(neededPermissions.toTypedArray())
             }
         }
     }
@@ -391,7 +349,6 @@ class MainActivity : ComponentActivity() {
                 else -> resource.contains("CLIPBOARD", ignoreCase = true)
             }
         }
-
         if (grantedResources.isNotEmpty()) {
             request.grant(grantedResources.toTypedArray())
         } else {
@@ -401,26 +358,9 @@ class MainActivity : ComponentActivity() {
 
     private fun handlePopupUrl(url: String) {
         when (UrlRouter.route(url)) {
-            UrlRouter.Route.IN_APP -> {
-                viewModel.clearError()
-                viewModel.selectDestination(AppDestination.WORKSPACE)
-                webViewController.loadUrl(url)
-            }
+            UrlRouter.Route.IN_APP -> bridgeEngine.reload(url)
             UrlRouter.Route.EXTERNAL_BROWSER -> openInCustomTabsOrBrowser(url)
             UrlRouter.Route.SYSTEM_INTENT -> openSystemIntent(url)
-        }
-    }
-
-    private fun shareCurrentPage(title: String, url: String) {
-        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_SUBJECT, title)
-            putExtra(Intent.EXTRA_TEXT, url)
-        }
-        try {
-            startActivity(Intent.createChooser(shareIntent, getString(R.string.share_chooser_title)))
-        } catch (_: ActivityNotFoundException) {
-            showSnackbar(getString(R.string.external_link_error))
         }
     }
 
@@ -429,11 +369,15 @@ class MainActivity : ComponentActivity() {
         clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
     }
 
-    private fun openSystemDownloads() {
+    private fun shareText(text: String) {
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
         try {
-            startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
+            startActivity(Intent.createChooser(shareIntent, getString(R.string.share_chooser_title)))
         } catch (_: ActivityNotFoundException) {
-            showSnackbar(getString(R.string.downloads_app_error))
+            showSnackbar(getString(R.string.external_link_error))
         }
     }
 
@@ -453,7 +397,6 @@ class MainActivity : ComponentActivity() {
                 .setToolbarColor(toolbarColor)
                 .setNavigationBarColor(navColor)
                 .build()
-
             val customTabsIntent = CustomTabsIntent.Builder()
                 .setColorScheme(
                     if (isDark) CustomTabsIntent.COLOR_SCHEME_DARK else CustomTabsIntent.COLOR_SCHEME_LIGHT
@@ -461,7 +404,6 @@ class MainActivity : ComponentActivity() {
                 .setDefaultColorSchemeParams(colors)
                 .setShowTitle(true)
                 .build()
-
             customTabsIntent.launchUrl(this, uri)
         } catch (_: Exception) {
             try {
@@ -479,7 +421,6 @@ class MainActivity : ComponentActivity() {
             } else {
                 Intent(Intent.ACTION_VIEW, Uri.parse(url))
             }
-
             try {
                 startActivity(intent)
             } catch (_: ActivityNotFoundException) {
@@ -504,24 +445,6 @@ class MainActivity : ComponentActivity() {
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
-    private fun enterFullscreenView(view: View, callback: WebChromeClient.CustomViewCallback) {
-        if (fullscreenWebView != null) {
-            callback.onCustomViewHidden()
-            return
-        }
-        fullscreenWebView = view
-        fullscreenCallback = callback
-        viewModel.setFullscreenWebView(true)
-    }
-
-    private fun exitFullscreenView() {
-        if (fullscreenWebView == null) return
-        fullscreenWebView = null
-        fullscreenCallback?.onCustomViewHidden()
-        fullscreenCallback = null
-        viewModel.setFullscreenWebView(false)
-    }
-
     private fun showSnackbar(message: String) {
         lifecycleScope.launch {
             snackbarHostState.currentSnackbarData?.dismiss()
@@ -531,16 +454,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        webViewController.onResume()
+        bridgeEngine.onResume()
     }
 
     override fun onPause() {
-        webViewController.onPause()
+        bridgeEngine.onPause()
         super.onPause()
     }
 
     override fun onStop() {
-        webViewController.flushCookies()
+        bridgeEngine.flushCookies()
         super.onStop()
     }
 
@@ -549,12 +472,11 @@ class MainActivity : ComponentActivity() {
         filePathCallback = null
         pendingWebPermissionRequest?.deny()
         pendingWebPermissionRequest = null
-        exitFullscreenView()
-        webViewController.destroy()
+        bridgeEngine.destroy()
         super.onDestroy()
     }
 
     companion object {
-        private const val SPLASH_MAX_HOLD_MS = 900L
+        private const val SPLASH_MAX_HOLD_MS = 750L
     }
 }
