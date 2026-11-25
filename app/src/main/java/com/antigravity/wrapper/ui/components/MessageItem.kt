@@ -186,6 +186,14 @@ private fun AssistantMessageSection(
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurface
             )
+            if (message.timestampLabel.isNotBlank()) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "• ${message.timestampLabel}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             if (message.isStreaming) {
                 Spacer(modifier = Modifier.width(8.dp))
                 StreamingPulseBadge()

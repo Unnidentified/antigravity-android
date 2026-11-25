@@ -3,6 +3,7 @@ package com.antigravity.wrapper.bridge
 import android.annotation.SuppressLint
 import android.os.Handler
 import android.os.Looper
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -17,19 +18,23 @@ import com.antigravity.wrapper.web.AntigravityWebViewClient
 import com.antigravity.wrapper.web.DownloadHandler
 import com.antigravity.wrapper.web.UrlRouter
 import com.antigravity.wrapper.web.UserAgentSanitizer
+import java.util.concurrent.Executors
 
 /**
  * Controller for the invisible/headless Antigravity WebView session.
- * Blocks Android focus and touch interception whenever hidden so it never steals
- * keyboard focus from the native Compose composer or interferes with drawer gestures.
+ * Parses incoming bridge JSON off the main thread to eliminate scroll/drawer frame drops,
+ * and strictly isolates focus/touch whenever hidden behind the native Compose UI.
  */
 class AntigravityBridgeEngine(
     private val onSnapshotReceived: (BridgeSnapshot) -> Unit,
     private val onBridgeLog: (String) -> Unit = {}
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val parserExecutor = Executors.newSingleThreadExecutor()
     private var webView: WebView? = null
     private var interactiveMode: Boolean = false
+    @Volatile
+    private var lastDeliveredSnapshot: BridgeSnapshot? = null
 
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface", "ClickableViewAccessibility")
     fun configureWebView(
@@ -83,11 +88,18 @@ class AntigravityBridgeEngine(
     }
 
     fun setInteractive(interactive: Boolean) {
+        if (interactiveMode == interactive && webView?.isFocusable == interactive) return
         interactiveMode = interactive
         val view = webView ?: return
         view.isFocusable = interactive
         view.isFocusableInTouchMode = interactive
         view.isClickable = interactive
+        view.alpha = if (interactive) 1f else 0f
+        view.importantForAccessibility = if (interactive) {
+            View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        } else {
+            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        }
         view.descendantFocusability = if (interactive) {
             ViewGroup.FOCUS_AFTER_DESCENDANTS
         } else {
@@ -117,7 +129,7 @@ class AntigravityBridgeEngine(
         }
         val escaped = AntigravityBridgeScript.escapeJsString(text)
         view.evaluateJavascript(
-            "window.__agBridge ? window.__agBridge.sendPrompt(\"$escaped\") : false;"
+            "window.__agBridge ? (window.__agBridge.sendPrompt(\"$escaped\"), true) : false;"
         ) { raw ->
             onResult(raw?.trim()?.equals("true", ignoreCase = true) == true)
         }
@@ -185,8 +197,10 @@ class AntigravityBridgeEngine(
         view.evaluateJavascript(
             "window.__agBridge ? window.__agBridge.dumpDomSnapshot() : '';"
         ) { raw ->
-            val decoded = decodeJsStringResult(raw)
-            onResult(decoded?.takeIf { it.isNotBlank() })
+            parserExecutor.execute {
+                val decoded = decodeJsStringResult(raw)?.takeIf { it.isNotBlank() }
+                mainHandler.post { onResult(decoded) }
+            }
         }
     }
 
@@ -209,6 +223,7 @@ class AntigravityBridgeEngine(
         cookieManager.removeAllCookies {
             cookieManager.flush()
             WebStorage.getInstance().deleteAllData()
+            lastDeliveredSnapshot = null
             webView?.apply {
                 clearCache(true)
                 clearHistory()
@@ -231,6 +246,7 @@ class AntigravityBridgeEngine(
     }
 
     fun destroy() {
+        parserExecutor.shutdownNow()
         webView?.apply {
             stopLoading()
             setOnTouchListener(null)
@@ -257,9 +273,14 @@ class AntigravityBridgeEngine(
     private inner class NativeJsBridge {
         @JavascriptInterface
         fun onStateSnapshot(json: String?) {
-            val snapshot = BridgeStateParser.parseSnapshot(json) ?: return
-            mainHandler.post {
-                onSnapshotReceived(snapshot)
+            if (json.isNullOrBlank()) return
+            parserExecutor.execute {
+                val snapshot = BridgeStateParser.parseSnapshot(json) ?: return@execute
+                if (snapshot == lastDeliveredSnapshot) return@execute
+                lastDeliveredSnapshot = snapshot
+                mainHandler.post {
+                    onSnapshotReceived(snapshot)
+                }
             }
         }
 

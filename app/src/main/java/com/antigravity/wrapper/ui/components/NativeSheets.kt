@@ -1,6 +1,7 @@
 package com.antigravity.wrapper.ui.components
 
 import android.os.Build
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -23,20 +25,23 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.ScreenLockPortrait
-import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Vibration
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.WifiOff
@@ -52,6 +57,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -61,8 +67,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -97,12 +106,15 @@ fun ModelSelectorSheet(
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val initialTier = remember(activeModelLabel) {
+    val activeEffort = remember(activeModelLabel) {
         Regex("\\b(Low|Medium|High|Extra)\\b", RegexOption.IGNORE_CASE)
             .find(activeModelLabel)?.groupValues?.get(1) ?: "High"
     }
-    var selectedEffort by remember(initialTier) { mutableStateOf(initialTier) }
+    var selectedEffort by remember(activeEffort) { mutableStateOf(activeEffort) }
     val effortChoices = listOf("Low", "Medium", "High", "Extra")
+    val activeModelObj = remember(models, activeModelLabel) {
+        models.firstOrNull { it.isSelected || activeModelLabel.startsWith(it.name, ignoreCase = true) }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -112,9 +124,11 @@ fun ModelSelectorSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp)
+                .padding(bottom = 24.dp)
         ) {
+            // Balanced single-axis sheet header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -125,7 +139,7 @@ fun ModelSelectorSheet(
                         imageVector = Icons.Rounded.Memory,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
@@ -135,46 +149,36 @@ fun ModelSelectorSheet(
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    FilledTonalButton(
+                    IconButton(
                         onClick = onRefreshModels,
                         enabled = !isRefreshing
                     ) {
                         if (isRefreshing) {
                             CircularProgressIndicator(
                                 strokeWidth = 2.dp,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(18.dp)
                             )
                         } else {
                             Icon(
                                 imageVector = Icons.Rounded.Refresh,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
+                                contentDescription = "Refresh models",
+                                modifier = Modifier.size(20.dp)
                             )
                         }
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            if (isRefreshing) "Syncing" else "Sync",
-                            style = MaterialTheme.typography.labelMedium
-                        )
                     }
-                    Spacer(modifier = Modifier.width(4.dp))
                     IconButton(onClick = onDismiss) {
-                        Icon(Icons.Rounded.Close, contentDescription = "Close")
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Close",
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
             }
 
-            if (activeModelLabel.isNotBlank()) {
-                Text(
-                    text = "Active: $activeModelLabel",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            Spacer(modifier = Modifier.height(10.dp))
 
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Thinking effort selector row for effort-group models
+            // Thinking effort selector — tapping a chip updates effort immediately if current model supports it
             Text(
                 text = "THINKING EFFORT",
                 style = MaterialTheme.typography.labelSmall,
@@ -188,8 +192,20 @@ fun ModelSelectorSheet(
                 effortChoices.forEach { effort ->
                     FilterChip(
                         selected = selectedEffort.equals(effort, ignoreCase = true),
-                        onClick = { selectedEffort = effort },
-                        label = { Text(effort, style = MaterialTheme.typography.labelMedium) },
+                        onClick = {
+                            selectedEffort = effort
+                            if (activeModelObj != null && activeModelObj.hasEffortLevels) {
+                                onSelectModel(activeModelObj.name, effort)
+                                onDismiss()
+                            }
+                        },
+                        label = {
+                            Text(
+                                text = effort,
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1
+                            )
+                        },
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -199,25 +215,28 @@ fun ModelSelectorSheet(
 
             if (models.isEmpty()) {
                 Surface(
-                    shape = RoundedCornerShape(18.dp),
+                    shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(
-                        modifier = Modifier.padding(18.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
                     ) {
+                        if (isRefreshing) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                        }
                         Text(
-                            text = if (isRefreshing) "Loading models…" else "No models synced yet",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Tap Sync above to fetch available models from Antigravity.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center
+                            text = if (isRefreshing) "Loading models…" else "Tap refresh to load models",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -231,8 +250,10 @@ fun ModelSelectorSheet(
                     models.forEach { model ->
                         val selected = model.isSelected ||
                             activeModelLabel.startsWith(model.name, ignoreCase = true)
-                        val tierToDisplay = model.tier.ifBlank {
-                            if (model.hasEffortLevels) selectedEffort else ""
+                        val tierLabel = if (model.hasEffortLevels) {
+                            if (selected) selectedEffort else model.tier.ifBlank { selectedEffort }
+                        } else {
+                            model.tier
                         }
                         Surface(
                             onClick = {
@@ -244,7 +265,7 @@ fun ModelSelectorSheet(
                                 onSelectModel(model.name, chosenTier)
                                 onDismiss()
                             },
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(16.dp),
                             color = if (selected) {
                                 MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
                             } else {
@@ -259,39 +280,52 @@ fun ModelSelectorSheet(
                                     } else {
                                         MaterialTheme.colorScheme.surfaceContainerHigh
                                     },
-                                    shape = RoundedCornerShape(18.dp)
+                                    shape = RoundedCornerShape(16.dp)
                                 )
                         ) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                    .padding(horizontal = 16.dp, vertical = 13.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = model.name,
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (tierToDisplay.isNotBlank()) {
-                                        Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = model.name,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (tierLabel.isNotBlank()) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(999.dp),
+                                        color = if (selected) {
+                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                        } else {
+                                            MaterialTheme.colorScheme.surfaceContainerHighest
+                                        }
+                                    ) {
                                         Text(
-                                            text = tierToDisplay,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            text = tierLabel,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (selected) {
+                                                MaterialTheme.colorScheme.primary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                         )
                                     }
                                 }
                                 if (selected) {
-                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Icon(
                                         imageVector = Icons.Rounded.Check,
                                         contentDescription = "Selected",
                                         tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(20.dp)
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
@@ -315,9 +349,16 @@ fun UsageQuotaSheet(
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val primaryColor = MaterialTheme.colorScheme.primary
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+
+    // Auto-load usage once on open when live usage hasn't been fetched yet
+    LaunchedEffect(Unit) {
+        if (!quota.isLiveFromServer && !isRefreshing && bridgeStatus == BridgeStatus.CONNECTED) {
+            onRefresh()
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -327,9 +368,11 @@ fun UsageQuotaSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp)
+                .padding(bottom = 24.dp)
         ) {
+            // Balanced single-axis header (icon-only Refresh + Close)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -337,10 +380,10 @@ fun UsageQuotaSheet(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Rounded.Speed,
+                        imageVector = Icons.Rounded.BarChart,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
@@ -350,71 +393,67 @@ fun UsageQuotaSheet(
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    FilledTonalButton(
+                    IconButton(
                         onClick = onRefresh,
                         enabled = !isRefreshing
                     ) {
                         if (isRefreshing) {
                             CircularProgressIndicator(
                                 strokeWidth = 2.dp,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(18.dp)
                             )
                         } else {
                             Icon(
                                 imageVector = Icons.Rounded.Refresh,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
+                                contentDescription = "Refresh usage",
+                                modifier = Modifier.size(20.dp)
                             )
                         }
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            if (isRefreshing) "Syncing" else "Refresh",
-                            style = MaterialTheme.typography.labelMedium
-                        )
                     }
-                    Spacer(modifier = Modifier.width(4.dp))
                     IconButton(onClick = onDismiss) {
-                        Icon(Icons.Rounded.Close, contentDescription = "Close")
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Close",
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
             }
 
-            // Inline refresh feedback directly inside the sheet (never hidden behind scrim!)
             if (!statusMessage.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = statusMessage,
-                    style = MaterialTheme.typography.labelMedium,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary
                 )
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Quota Gauge Card
+            // Compact Quota Gauge Card (56dp ring so text has plenty of breathing room)
             Surface(
-                shape = RoundedCornerShape(22.dp),
+                shape = RoundedCornerShape(18.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(20.dp),
+                        .padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
-                        modifier = Modifier.size(74.dp),
+                        modifier = Modifier.size(56.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         val pct = quota.usedPercent ?: 0f
-                        Canvas(modifier = Modifier.size(66.dp)) {
+                        Canvas(modifier = Modifier.size(52.dp)) {
                             drawArc(
                                 color = trackColor,
                                 startAngle = 0f,
                                 sweepAngle = 360f,
                                 useCenter = false,
-                                style = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round)
+                                style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
                             )
                             if (quota.usedPercent != null) {
                                 drawArc(
@@ -422,50 +461,55 @@ fun UsageQuotaSheet(
                                     startAngle = -90f,
                                     sweepAngle = (pct / 100f).coerceIn(0.03f, 1f) * 360f,
                                     useCenter = false,
-                                    style = Stroke(width = 7.dp.toPx(), cap = StrokeCap.Round)
+                                    style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
                                 )
                             }
                         }
                         Text(
-                            text = quota.usedPercent?.let { "${it.toInt()}%" } ?: "Live",
-                            style = MaterialTheme.typography.titleSmall,
+                            text = quota.usedPercent?.let { "${it.toInt()}%" } ?: "—",
+                            style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(18.dp))
+                    Spacer(modifier = Modifier.width(16.dp))
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = quota.planLabel,
                             style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = when {
-                                quota.rawSummary.isNotBlank() -> quota.rawSummary
+                                isRefreshing -> "Checking live quota…"
                                 quota.remainingLabel.isNotBlank() -> quota.remainingLabel
-                                else -> "Tap Refresh above to query live usage from Antigravity."
+                                else -> "Usage summary unavailable for current view"
                             },
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                         if (quota.resetLabel.isNotBlank()) {
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text = quota.resetLabel,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // Active Model full-width tile (never truncated mid-word)
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -561,9 +605,10 @@ fun QuickPromptsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp)
+                .padding(bottom = 24.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -591,14 +636,14 @@ fun QuickPromptsSheet(
                         Text("New")
                     }
                     IconButton(onClick = onDismiss) {
-                        Icon(Icons.Rounded.Close, contentDescription = "Close")
+                        Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(20.dp))
                     }
                 }
             }
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 prompts.forEach { prompt ->
                     Surface(
                         onClick = {
@@ -648,7 +693,6 @@ fun QuickPromptsSheet(
     if (showAddDialog) {
         var title by remember { mutableStateOf("") }
         var body by remember { mutableStateOf("") }
-        val category = "Custom"
         AlertDialog(
             onDismissRequest = { showAddDialog = false },
             title = { Text("New Quick Prompt") },
@@ -673,7 +717,7 @@ fun QuickPromptsSheet(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        onAddPrompt(title, body, category)
+                        onAddPrompt(title, body, "Custom")
                         showAddDialog = false
                     },
                     enabled = title.isNotBlank() && body.isNotBlank()
@@ -688,9 +732,12 @@ fun QuickPromptsSheet(
     }
 }
 
+/**
+ * Full-screen native Settings page (replaces the cramped 95%-height bottom sheet).
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsSheet(
+fun SettingsFullScreen(
     settings: AppSettings,
     bridgeStatus: BridgeStatus,
     diagnosticsNote: String,
@@ -703,53 +750,58 @@ fun SettingsSheet(
     onWebInspectorChange: (Boolean) -> Unit,
     onCopyDomSnapshot: () -> Unit,
     onSignOut: () -> Unit,
-    onDismiss: () -> Unit
+    onBack: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var sliderScale by remember(settings.fontScalePercent) {
         mutableFloatStateOf(settings.fontScalePercent.toFloat())
     }
+    var showDiagnostics by remember { mutableStateOf(false) }
     var showSignOutConfirm by remember { mutableStateOf(false) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
-    ) {
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background
+                ),
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                },
+                title = {
+                    Text(
+                        text = "Settings",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                }
+            )
+        }
+    ) { innerPadding ->
         Column(
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxSize()
+                .padding(innerPadding)
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 32.dp),
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Settings & Diagnostics",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Rounded.Close, contentDescription = "Close")
-                }
-            }
-
-            // Appearance Card
+            // Appearance
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        text = "Theme",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
+                        text = "Appearance",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
                     )
                     Spacer(modifier = Modifier.height(10.dp))
                     SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
@@ -776,11 +828,12 @@ fun SettingsSheet(
                     Spacer(modifier = Modifier.height(10.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
                             text = "Message text scale",
-                            style = MaterialTheme.typography.titleSmall,
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
@@ -791,25 +844,26 @@ fun SettingsSheet(
                     }
                     Slider(
                         value = sliderScale,
-                        onValueChange = { sliderScale = it },
-                        onValueChangeFinished = {
-                            val snapped = (sliderScale / 5f).roundToInt() * 5
-                            sliderScale = snapped.toFloat()
-                            onFontScaleChange(snapped)
-                        },
-                        valueRange = 85f..135f,
-                        steps = 9
+                        onValueChange = { sliderScale = (it / 5f).roundToInt() * 5f },
+                        onValueChangeFinished = { onFontScaleChange(sliderScale.roundToInt()) },
+                        valueRange = 85f..135f
                     )
                 }
             }
 
-            // Reading & Behavior Card
+            // Reading & Behavior
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Text(
+                        text = "Experience",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
                     SheetSwitchRow(
                         icon = Icons.Rounded.Psychology,
                         title = "Auto-expand reasoning blocks",
@@ -833,67 +887,78 @@ fun SettingsSheet(
                 }
             }
 
-            // Headless Bridge Diagnostics & Calibration Card
+            // Collapsible Developer Diagnostics (raw telemetry hidden cleanly by default)
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { showDiagnostics = !showDiagnostics }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Icon(
                             imageVector = Icons.Rounded.BugReport,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(20.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
                         Text(
-                            text = "Bridge Diagnostics",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface
+                            text = "Developer Diagnostics",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
                         )
-                    }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = "Status: ${bridgeStatus.label}" +
-                            if (diagnosticsNote.isNotBlank()) " • $diagnosticsNote" else "",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Button(
-                        onClick = onCopyDomSnapshot,
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
                         Icon(
-                            imageVector = Icons.Rounded.ContentCopy,
+                            imageVector = if (showDiagnostics) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
                             contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Copy Sanitized DOM Snapshot")
                     }
-                    Spacer(modifier = Modifier.height(10.dp))
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                    Spacer(modifier = Modifier.height(6.dp))
-                    SheetSwitchRow(
-                        icon = Icons.Rounded.Visibility,
-                        title = "Show underlying session (debug fallback)",
-                        checked = settings.webInspectorMode,
-                        onCheckedChange = {
-                            onWebInspectorChange(it)
-                            if (it) onDismiss()
+
+                    AnimatedVisibility(visible = showDiagnostics) {
+                        Column(modifier = Modifier.padding(top = 8.dp, bottom = 6.dp)) {
+                            Text(
+                                text = "Bridge: ${bridgeStatus.label}" +
+                                    if (diagnosticsNote.isNotBlank()) " • $diagnosticsNote" else "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            FilledTonalButton(
+                                onClick = onCopyDomSnapshot,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Copy Sanitized DOM Snapshot")
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            SheetSwitchRow(
+                                icon = Icons.Rounded.Visibility,
+                                title = "Show underlying session",
+                                checked = settings.webInspectorMode,
+                                onCheckedChange = {
+                                    onWebInspectorChange(it)
+                                    if (it) onBack()
+                                }
+                            )
                         }
-                    )
+                    }
                 }
             }
 
-            // Account & Version Card
+            // Account & Version
             Surface(
                 shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -938,7 +1003,7 @@ fun SettingsSheet(
                 TextButton(
                     onClick = {
                         showSignOutConfirm = false
-                        onDismiss()
+                        onBack()
                         onSignOut()
                     }
                 ) {
@@ -1008,9 +1073,9 @@ fun EmptyChatWelcome(
             if (isSwitchingConversation) {
                 CircularProgressIndicator(
                     strokeWidth = 3.dp,
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier.size(34.dp)
                 )
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
                 Text(
                     text = "Loading conversation…",
                     style = MaterialTheme.typography.titleMedium,
@@ -1021,7 +1086,7 @@ fun EmptyChatWelcome(
 
             Box(
                 modifier = Modifier
-                    .size(64.dp)
+                    .size(62.dp)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.primaryContainer),
                 contentAlignment = Alignment.Center
@@ -1034,11 +1099,11 @@ fun EmptyChatWelcome(
                     },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier.size(30.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             Text(
                 text = when (bridgeStatus) {
@@ -1056,7 +1121,7 @@ fun EmptyChatWelcome(
 
             Text(
                 text = errorMessage ?: when {
-                    bridgeStatus == BridgeStatus.CONNECTING -> "Syncing your session, conversations, and models."
+                    bridgeStatus == BridgeStatus.CONNECTING -> "Syncing your workspace and models."
                     activeModelLabel.isNotBlank() -> activeModelLabel
                     else -> "Ready for your prompt"
                 },
@@ -1075,7 +1140,7 @@ fun EmptyChatWelcome(
                         Text("Retry")
                     }
                     FilledTonalButton(onClick = onOpenSettings) {
-                        Text("Diagnostics")
+                        Text("Settings")
                     }
                 }
             } else {
