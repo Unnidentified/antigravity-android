@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="antigravity_background">#131314</color>
+    <color name="antigravity_surface">#1E1F20</color>
+    <color name="antigravity_surface_variant">#282A2C</color>
+    <color name="antigravity_outline">#444746</color>
+
+    <color name="antigravity_primary">#A8C7FA</color>
+    <color name="antigravity_on_primary">#062E6F</color>
+    <color name="antigravity_primary_container">#0842A0</color>
+    <color name="antigravity_on_primary_container">#D3E3FD</color>
+
+    <color name="antigravity_text_primary">#E3E3E3</color>
+    <color name="antigravity_text_secondary">#C4C7C5</color>
+
+    <color name="antigravity_progress_track">#282A2C</color>
+    <color name="antigravity_progress_indicator">#A8C7FA</color>
+    <color name="antigravity_splash_background">#0E0F12</color>
+</resources>
