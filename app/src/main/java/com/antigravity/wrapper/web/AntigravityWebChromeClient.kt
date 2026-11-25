@@ -11,12 +11,13 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 
 /**
- * Custom [WebChromeClient] handling loading progress, native file uploads via
+ * Custom [WebChromeClient] handling loading progress, page title updates, native file uploads via
  * [onShowFileChooser], runtime-backed browser permissions via [onPermissionRequest],
  * popup/new-tab routing via [onCreateWindow], and fullscreen custom views.
  */
 class AntigravityWebChromeClient(
     private val onProgressUpdate: (progress: Int) -> Unit,
+    private val onTitleChanged: (title: String?) -> Unit,
     private val onFileChooserRequested: (
         filePathCallback: ValueCallback<Array<Uri>>,
         fileChooserParams: FileChooserParams?
@@ -31,6 +32,11 @@ class AntigravityWebChromeClient(
     override fun onProgressChanged(view: WebView?, newProgress: Int) {
         super.onProgressChanged(view, newProgress)
         onProgressUpdate(newProgress)
+    }
+
+    override fun onReceivedTitle(view: WebView?, title: String?) {
+        super.onReceivedTitle(view, title)
+        onTitleChanged(title)
     }
 
     override fun onShowFileChooser(

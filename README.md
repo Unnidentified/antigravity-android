@@ -1,15 +1,19 @@
 # Antigravity for Android
 
-Native Kotlin Android WebView wrapper for [`https://antigravity.google.com`](https://antigravity.google.com).
+Native Jetpack Compose & Material 3 Android app for [`https://antigravity.google.com`](https://antigravity.google.com).
 
 ## Features
-- **Single-Activity Material 3 UI** with edge-to-edge `WindowInsets` handling, dark minimalist adaptive icon, and AndroidX `SplashScreen`.
-- **Google OAuth Compatible WebView** with JavaScript, DOM/database storage, hardware acceleration, persistent first- and third-party cookies, and sanitized Chrome Mobile User-Agent.
-- **Smart URL Routing** keeping `antigravity.google.com` and Google auth domains in-app while opening external links in Chrome Custom Tabs.
-- **Native UX** including `OnBackPressedCallback` history navigation, top `LinearProgressIndicator`, scroll-gated `SwipeRefreshLayout`, native offline/error screen with retry, file uploads (`OpenMultipleDocuments`), authenticated downloads (`DownloadManager`), and origin-checked `onPermissionRequest` handling.
+- **Native Jetpack Compose + Material 3 Shell**: Full bottom navigation (`Workspace`, `Saved`, `Downloads`, `Settings`), branded navigation drawer with pinned bookmarks, adaptive edge-to-edge bars, and IME-aware layout that hides bottom chrome while typing.
+- **Material You & Themes**: Supports System, Dark, pure AMOLED Black, and Light themes, plus Android 12+ Material You dynamic colors.
+- **Quick Controls & Quick Prompts**: One-tap bottom sheet with Back/Forward/Home/Share/Copy/Find actions, live text scaling (80%–150%), Mobile UI Polish, Desktop Viewport mode, Focus Mode, and reusable Quick Prompts that insert directly into the active input (or copy to clipboard).
+- **Retained Workspace Session**: Switching between native tabs never reloads or resets your active Antigravity session.
+- **Native Bookmarks & Downloads**: Search, pin, and organize Antigravity links; track authenticated downloads in-app with one-tap access to Android Downloads.
+- **Google OAuth & Mobile Web Integration**: Persistent first-/third-party cookies, sanitized Chrome Mobile User-Agent, Chrome Custom Tabs for external links, native file uploads (`OpenMultipleDocuments`), and origin-checked media permissions.
 
-## Build
+## Build & Test
 ```bash
-./gradlew assembleDebug
-./gradlew testDebugUnitTest
+./gradlew testDebugUnitTest assembleDebug
 ```
+
+## Automated Releases
+Pushing a tag matching `v*` (for example `v1.0.0-alpha.2`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml) to run unit tests, assemble `antigravity-debug.apk`, and automatically publish the GitHub release (marked as a prerelease when the tag contains `-`) with the APK attached.
