@@ -11,16 +11,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.DataUsage
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -48,6 +47,10 @@ fun ChatTopBar(
     val primaryColor = MaterialTheme.colorScheme.primary
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
 
+    val displayTitle = conversationTitle
+        .takeIf { it.isNotBlank() && !it.equals("Google Antigravity", ignoreCase = true) }
+        ?: "Antigravity"
+
     CenterAlignedTopAppBar(
         colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
             containerColor = MaterialTheme.colorScheme.background,
@@ -72,24 +75,25 @@ fun ChatTopBar(
                     .padding(horizontal = 10.dp, vertical = 4.dp)
             ) {
                 Text(
-                    text = conversationTitle.ifBlank { "Antigravity" },
+                    text = displayTitle,
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    val subtitle = when (bridgeStatus) {
-                        BridgeStatus.CONNECTING -> "Syncing…"
-                        BridgeStatus.OFFLINE -> "Offline"
-                        BridgeStatus.ERROR -> "Reconnect needed"
-                        BridgeStatus.AUTH_REQUIRED -> "Sign in required"
-                        BridgeStatus.CONNECTED -> activeModelLabel
+                    val subtitle = when {
+                        bridgeStatus == BridgeStatus.CONNECTING -> "Connecting…"
+                        bridgeStatus == BridgeStatus.OFFLINE -> "Offline"
+                        bridgeStatus == BridgeStatus.ERROR -> "Reconnect needed"
+                        bridgeStatus == BridgeStatus.AUTH_REQUIRED -> "Sign in required"
+                        activeModelLabel.isNotBlank() -> activeModelLabel
+                        else -> "Select model"
                     }
                     Text(
                         text = subtitle,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (bridgeStatus == BridgeStatus.CONNECTED) {
+                        color = if (bridgeStatus == BridgeStatus.CONNECTED && activeModelLabel.isNotBlank()) {
                             MaterialTheme.colorScheme.primary
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
@@ -135,8 +139,8 @@ fun ChatTopBar(
                     }
                 } else {
                     Icon(
-                        imageVector = Icons.Rounded.DataUsage,
-                        contentDescription = "Usage quota"
+                        imageVector = Icons.Rounded.Speed,
+                        contentDescription = "Usage & quota"
                     )
                 }
             }

@@ -12,6 +12,7 @@ import com.antigravity.wrapper.data.MessageRole
 import com.antigravity.wrapper.data.ModelOption
 import com.antigravity.wrapper.data.QuickPrompt
 import com.antigravity.wrapper.data.ThemeMode
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -25,12 +26,17 @@ data class ChatUiState(
     val bridgeStatus: BridgeStatus = BridgeStatus.CONNECTING,
     val snapshot: BridgeSnapshot = BridgeSnapshot(),
     val optimisticMessages: List<ChatMessage> = emptyList(),
+    val optimisticModelLabel: String? = null,
     val composerText: String = "",
     val expandedReasoningIds: Map<String, Boolean> = emptyMap(),
     val isModelSheetOpen: Boolean = false,
     val isQuotaSheetOpen: Boolean = false,
     val isSettingsSheetOpen: Boolean = false,
     val isQuickPromptsSheetOpen: Boolean = false,
+    val isRefreshingModels: Boolean = false,
+    val isRefreshingQuota: Boolean = false,
+    val quotaStatusMessage: String? = null,
+    val isSwitchingConversation: Boolean = false,
     val errorMessage: String? = null,
     val lastSyncTimeMillis: Long = 0L
 ) {
@@ -46,9 +52,10 @@ data class ChatUiState(
         }
 
     val activeModelLabel: String
-        get() = snapshot.activeModelName.ifBlank {
-            snapshot.models.firstOrNull { it.isSelected }?.name ?: "Antigravity Model"
-        }
+        get() = optimisticModelLabel
+            ?: snapshot.activeModelName.ifBlank {
+                snapshot.models.firstOrNull { it.isSelected }?.displayLabel ?: ""
+            }
 
     val availableModels: List<ModelOption>
         get() = if (snapshot.models.isNotEmpty()) {
@@ -58,7 +65,6 @@ data class ChatUiState(
                 ModelOption(
                     id = snapshot.activeModelName,
                     name = snapshot.activeModelName,
-                    description = "Currently active model",
                     isSelected = true
                 )
             )
@@ -99,10 +105,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val remainingOptimistic = current.optimisticMessages.filterNot {
                 it.markdownContent.trim() in serverUserTexts
             }
+            val clearOptimisticModel = current.optimisticModelLabel != null &&
+                snapshot.activeModelName.isNotBlank() &&
+                snapshot.activeModelName.contains(
+                    current.optimisticModelLabel.substringBefore(" "),
+                    ignoreCase = true
+                )
             current.copy(
                 bridgeStatus = nextStatus,
                 snapshot = snapshot,
                 optimisticMessages = remainingOptimistic,
+                optimisticModelLabel = if (clearOptimisticModel) null else current.optimisticModelLabel,
+                isRefreshingModels = if (snapshot.models.isNotEmpty()) false else current.isRefreshingModels,
+                isRefreshingQuota = false,
+                quotaStatusMessage = if (current.isRefreshingQuota) {
+                    if (snapshot.quota.isLiveFromServer) "Updated just now" else "Synced with session"
+                } else {
+                    current.quotaStatusMessage
+                },
+                isSwitchingConversation = if (snapshot.messages.isNotEmpty()) false else current.isSwitchingConversation,
                 errorMessage = null,
                 lastSyncTimeMillis = System.currentTimeMillis()
             )
@@ -123,6 +144,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 bridgeStatus = if (isOffline) BridgeStatus.OFFLINE else BridgeStatus.ERROR,
+                isRefreshingModels = false,
+                isRefreshingQuota = false,
+                isSwitchingConversation = false,
                 errorMessage = description ?: if (isOffline) "No internet connection" else "Unable to connect to Antigravity"
             )
         }
@@ -134,6 +158,62 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 bridgeStatus = BridgeStatus.CONNECTING,
                 errorMessage = null
             )
+        }
+    }
+
+    fun onStartConversationSwitch() {
+        _uiState.update {
+            it.copy(
+                optimisticMessages = emptyList(),
+                isSwitchingConversation = true
+            )
+        }
+        viewModelScope.launch {
+            delay(2_500L)
+            _uiState.update { it.copy(isSwitchingConversation = false) }
+        }
+    }
+
+    fun onStartModelRefresh() {
+        _uiState.update { it.copy(isRefreshingModels = true) }
+        viewModelScope.launch {
+            delay(2_000L)
+            _uiState.update { it.copy(isRefreshingModels = false) }
+        }
+    }
+
+    fun onSelectModelOptimistic(modelName: String, effortTier: String) {
+        val label = if (effortTier.isNotBlank() && !modelName.endsWith(effortTier, ignoreCase = true)) {
+            "$modelName $effortTier"
+        } else {
+            modelName
+        }
+        _uiState.update { it.copy(optimisticModelLabel = label) }
+        viewModelScope.launch {
+            delay(4_000L)
+            _uiState.update { it.copy(optimisticModelLabel = null) }
+        }
+    }
+
+    fun onStartQuotaRefresh() {
+        _uiState.update {
+            it.copy(
+                isRefreshingQuota = true,
+                quotaStatusMessage = "Syncing usage…"
+            )
+        }
+        viewModelScope.launch {
+            delay(2_500L)
+            _uiState.update { state ->
+                if (state.isRefreshingQuota) {
+                    state.copy(
+                        isRefreshingQuota = false,
+                        quotaStatusMessage = "Synced with session"
+                    )
+                } else {
+                    state
+                }
+            }
         }
     }
 
@@ -183,7 +263,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setModelSheetOpen(open: Boolean) = _uiState.update { it.copy(isModelSheetOpen = open) }
-    fun setQuotaSheetOpen(open: Boolean) = _uiState.update { it.copy(isQuotaSheetOpen = open) }
+    fun setQuotaSheetOpen(open: Boolean) = _uiState.update {
+        it.copy(
+            isQuotaSheetOpen = open,
+            quotaStatusMessage = if (!open) null else it.quotaStatusMessage
+        )
+    }
     fun setSettingsSheetOpen(open: Boolean) = _uiState.update { it.copy(isSettingsSheetOpen = open) }
     fun setQuickPromptsSheetOpen(open: Boolean) = _uiState.update { it.copy(isQuickPromptsSheetOpen = open) }
 

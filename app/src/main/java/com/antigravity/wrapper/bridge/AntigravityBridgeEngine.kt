@@ -3,6 +3,7 @@ package com.antigravity.wrapper.bridge
 import android.annotation.SuppressLint
 import android.os.Handler
 import android.os.Looper
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebSettings
@@ -19,8 +20,8 @@ import com.antigravity.wrapper.web.UserAgentSanitizer
 
 /**
  * Controller for the invisible/headless Antigravity WebView session.
- * Never renders as a browser to the user — only surfaces when Google OAuth sign-in
- * is required (or if the user explicitly enables temporary Web Inspector mode in Settings).
+ * Blocks Android focus and touch interception whenever hidden so it never steals
+ * keyboard focus from the native Compose composer or interferes with drawer gestures.
  */
 class AntigravityBridgeEngine(
     private val onSnapshotReceived: (BridgeSnapshot) -> Unit,
@@ -28,8 +29,9 @@ class AntigravityBridgeEngine(
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var webView: WebView? = null
+    private var interactiveMode: Boolean = false
 
-    @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+    @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface", "ClickableViewAccessibility")
     fun configureWebView(
         view: WebView,
         webViewClient: AntigravityWebViewClient,
@@ -70,11 +72,30 @@ class AntigravityBridgeEngine(
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(view, true)
 
+        view.setOnTouchListener { _, _ -> !interactiveMode }
+        setInteractive(false)
+
         view.addJavascriptInterface(NativeJsBridge(), "AntigravityNative")
         view.webViewClient = webViewClient
         view.webChromeClient = webChromeClient
         view.setDownloadListener(downloadHandler)
         view.loadUrl(initialUrl.ifBlank { UrlRouter.START_URL })
+    }
+
+    fun setInteractive(interactive: Boolean) {
+        interactiveMode = interactive
+        val view = webView ?: return
+        view.isFocusable = interactive
+        view.isFocusableInTouchMode = interactive
+        view.isClickable = interactive
+        view.descendantFocusability = if (interactive) {
+            ViewGroup.FOCUS_AFTER_DESCENDANTS
+        } else {
+            ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
+        if (!interactive && view.hasFocus()) {
+            view.clearFocus()
+        }
     }
 
     fun injectBridgeScript() {
@@ -116,10 +137,18 @@ class AntigravityBridgeEngine(
         )
     }
 
-    fun selectModel(modelName: String) {
-        val escaped = AntigravityBridgeScript.escapeJsString(modelName)
+    fun selectModel(modelName: String, effortTier: String = "") {
+        val escapedModel = AntigravityBridgeScript.escapeJsString(modelName)
+        val escapedTier = AntigravityBridgeScript.escapeJsString(effortTier)
         webView?.evaluateJavascript(
-            "window.__agBridge && window.__agBridge.selectModel(\"$escaped\");",
+            "window.__agBridge && window.__agBridge.selectModel(\"$escapedModel\", \"$escapedTier\");",
+            null
+        )
+    }
+
+    fun refreshQuota() {
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.refreshQuota();",
             null
         )
     }
@@ -204,6 +233,7 @@ class AntigravityBridgeEngine(
     fun destroy() {
         webView?.apply {
             stopLoading()
+            setOnTouchListener(null)
             removeJavascriptInterface("AntigravityNative")
             setDownloadListener(null)
             webChromeClient = null

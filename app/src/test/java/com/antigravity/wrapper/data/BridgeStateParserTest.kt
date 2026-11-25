@@ -72,6 +72,21 @@ class BridgeStateParserTest {
     }
 
     @Test
+    fun normalizesParenthesizedModelTierAndStartupHeaderTitle() {
+        val (name1, tier1) = BridgeStateParser.normalizeModelNameAndTier("GPT-OSS 120B (Medium)", "")
+        assertEquals("GPT-OSS 120B", name1)
+        assertEquals("Medium", tier1)
+
+        val (name2, tier2) = BridgeStateParser.normalizeModelNameAndTier("Gemini 4 Neon", "High")
+        assertEquals("Gemini 4 Neon", name2)
+        assertEquals("High", tier2)
+
+        assertEquals("Antigravity", BridgeStateParser.normalizeConversationTitle("Google Antigravity"))
+        assertEquals("Antigravity", BridgeStateParser.normalizeConversationTitle(""))
+        assertEquals("AI Agent Handoff Process", BridgeStateParser.normalizeConversationTitle("AI Agent Handoff Process"))
+    }
+
+    @Test
     fun returnsNullOnMalformedOrBlankInput() {
         assertEquals(null, BridgeStateParser.parseSnapshot(null))
         assertEquals(null, BridgeStateParser.parseSnapshot(""))

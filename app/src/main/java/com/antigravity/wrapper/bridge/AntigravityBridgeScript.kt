@@ -1,11 +1,13 @@
 package com.antigravity.wrapper.bridge
 
 /**
- * Self-contained JavaScript engine injected into the headless Antigravity WebView.
- * Targets `[data-testid="mobile-layout"]` and React bottom-sheet portals (`.agy-overlay-item`),
- * observes DOM/Shadow-DOM mutations, extracts structured chat state (conversations, messages
- * with lossless Markdown/LaTeX, collapsible reasoning, artifacts, active model, model list,
- * usage quota), drives native actions, and exports a flattened structural DOM snapshot.
+ * Self-contained JavaScript engine calibrated to Antigravity's mobile DOM (`[data-testid="mobile-layout"]`):
+ * - Conversations: `[data-testid="conversation-row-sidebar"]` (`a[aria-label]`)
+ * - Model selector: `[data-testid="model-selector-trigger"]`, `[data-testid="model-selector-panel"]`,
+ *   two-step `[data-testid="model-selector-effort-group"]` -> `[data-testid="model-selector-effort-option"]`,
+ *   and single-step `[data-testid="model-selector-item"]`
+ * - Usage quota: `"View Usage"` inside `[data-testid="model-selector-panel"]`
+ * - Composer: `[data-testid="agent-input-box"]`, `[aria-label="Message input"]`, `[data-testid="send-button"]`
  */
 object AntigravityBridgeScript {
 
@@ -15,16 +17,25 @@ object AntigravityBridgeScript {
             window.location.replace('https://antigravity.google.com/remote');
             return;
           }
-          if (window.__agBridge && window.__agBridge.version === 3) {
+          if (window.__agBridge && window.__agBridge.version === 4) {
             window.__agBridge.syncNow();
             return;
           }
 
-          const BRIDGE_VERSION = 3;
+          const BRIDGE_VERSION = 4;
           let cachedModels = [];
           let cachedConversations = [];
+          let cachedQuota = {
+            usedPercent: null,
+            remainingLabel: '',
+            resetLabel: '',
+            planLabel: 'Antigravity',
+            rawSummary: '',
+            isLive: false
+          };
           let syncTimer = null;
           let lastPayloadHash = '';
+          let isInternalModalProbe = false;
 
           function getAppRoot() {
             return document.querySelector('[data-testid="mobile-layout"]') ||
@@ -96,20 +107,15 @@ object AntigravityBridgeScript {
             const testId = (el.getAttribute('data-testid') || '').toLowerCase();
             const aria = (el.getAttribute('aria-label') || '').toLowerCase();
             if (tag === 'details') return true;
-            if (cls.includes('thought') || cls.includes('thinking') || cls.includes('reasoning') ||
-                testId.includes('thought') || testId.includes('reason') ||
-                aria.includes('thought') || aria.includes('reasoning')) {
-              return true;
-            }
-            return false;
+            return cls.includes('thought') || cls.includes('thinking') || cls.includes('reasoning') ||
+              testId.includes('thought') || testId.includes('reason') ||
+              aria.includes('thought') || aria.includes('reasoning');
           }
 
           function nodeToMarkdown(node, depth) {
             if (!node) return '';
             if (depth > 48) return '';
-            if (node.nodeType === 3) {
-              return node.nodeValue || '';
-            }
+            if (node.nodeType === 3) return node.nodeValue || '';
             if (node.nodeType !== 1) return '';
 
             const tag = (node.tagName || '').toLowerCase();
@@ -277,6 +283,8 @@ object AntigravityBridgeScript {
 
           function findComposerInput() {
             const root = getAppRoot();
+            const exact = root.querySelector('[data-testid="agent-input-box"] [aria-label="Message input"], [aria-label="Message input"]');
+            if (exact && isVisible(exact)) return exact;
             const candidates = collectDeep(root, el => {
               const tag = (el.tagName || '').toLowerCase();
               if (tag === 'textarea') return !el.disabled && !el.readOnly && isVisible(el);
@@ -291,101 +299,90 @@ object AntigravityBridgeScript {
 
           function findModelSelectorButton() {
             const root = getAppRoot();
-            const composer = findComposerInput();
-            const composerRect = composer ? composer.getBoundingClientRect() : null;
-            const buttons = collectDeep(root, el => {
-              const tag = (el.tagName || '').toLowerCase();
-              const role = el.getAttribute('role') || '';
-              if (tag !== 'button' && role !== 'button' && role !== 'combobox') return false;
-              if (!isVisible(el)) return false;
-              const txt = cleanText(el.textContent);
-              if (!txt || txt.length > 56) return false;
-              const hasModelKeyword = /(gemini|claude|gpt|o1|o3|sonnet|opus|haiku|flash|pro|neon|ultra|model)/i.test(txt);
-              const hasPopup = el.getAttribute('aria-haspopup') === 'listbox' || el.getAttribute('aria-haspopup') === 'menu';
-              return hasModelKeyword || (hasPopup && composerRect && Math.abs(el.getBoundingClientRect().top - composerRect.bottom) < 120);
-            }, 60);
-            if (!buttons.length) return null;
-            if (composerRect) {
-              buttons.sort((a, b) => {
-                const da = Math.abs(a.getBoundingClientRect().top - composerRect.bottom);
-                const db = Math.abs(b.getBoundingClientRect().top - composerRect.bottom);
-                return da - db;
-              });
-            }
-            return buttons[0];
+            const exact = root.querySelector('[data-testid="model-selector-trigger"]');
+            if (exact && isVisible(exact)) return exact;
+            const byAria = root.querySelector('button[aria-label^="Select model"]');
+            if (byAria && isVisible(byAria)) return byAria;
+            return null;
           }
 
-          function getVisibleOverlayOptions() {
-            // Antigravity mobile uses React portals with [data-testid="bottom-sheet"] + .agy-overlay-item
-            const sheetItems = collectDeep(document.body, el => {
-              if (!isVisible(el)) return false;
-              const cls = typeof el.className === 'string' ? el.className : '';
-              const role = el.getAttribute('role') || '';
-              if (cls.includes('agy-overlay-item')) return true;
-              if (role === 'menuitem' || role === 'option' || role === 'menuitemradio') return true;
-              return false;
-            }, 80);
-            return sheetItems;
+          function parseActiveModelName(btn) {
+            if (!btn) return '';
+            const aria = btn.getAttribute('aria-label') || '';
+            const m = aria.match(/current:\s*(.+)$/i);
+            if (m && m[1]) return cleanText(m[1]);
+            return cleanText(btn.textContent);
+          }
+
+          function parseAriaCurrentValue(selector) {
+            const el = getAppRoot().querySelector(selector);
+            if (!el) return '';
+            const aria = el.getAttribute('aria-label') || '';
+            const m = aria.match(/current:\s*(.+)$/i);
+            return m && m[1] ? cleanText(m[1]) : cleanText(el.textContent);
           }
 
           function dismissOverlays() {
-            const backdrop = document.querySelector('[data-testid="bottom-sheet-backdrop"]');
-            if (backdrop && isVisible(backdrop)) {
-              backdrop.click();
-            }
+            const backdrops = document.querySelectorAll('[data-testid="bottom-sheet-backdrop"]');
+            backdrops.forEach(b => {
+              if (isVisible(b)) b.click();
+            });
             document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
           }
 
-          function isNonChatHref(href) {
-            const path = (href || '').toLowerCase();
-            return !path || path.startsWith('#') ||
-              path.includes('/customizations') || path.includes('/settings') ||
-              path.includes('/plugins') || path.includes('/privacy') ||
-              path.includes('/terms') || path.includes('/help') ||
-              path.includes('/feedback') || path.includes('accounts.google.');
+          function extractRelativeTime(row, cleanTitle) {
+            const spans = Array.from(row.querySelectorAll('span, time'));
+            for (const sp of spans) {
+              const txt = cleanText(sp.textContent);
+              if (!txt || txt === cleanTitle) continue;
+              if (/^(\d+\s*(?:s|m|h|d|w|mo|y)|just now|now|today|yesterday)$/i.test(txt)) {
+                return txt;
+              }
+            }
+            return '';
           }
 
           function extractConversations() {
             const root = getAppRoot();
-            const links = collectDeep(root, el => {
-              const tag = (el.tagName || '').toLowerCase();
-              const role = el.getAttribute('role') || '';
-              const tid = (el.getAttribute('data-testid') || '').toLowerCase();
-              if (tid.includes('conversation') || tid.includes('chat-item') || tid.includes('thread')) {
-                return cleanText(el.textContent).length > 1;
-              }
-              if (tag === 'a') {
-                const href = el.getAttribute('href') || '';
-                if (isNonChatHref(href)) return false;
-                if (/^\/(c|chat|conversation|session|thread)\//i.test(href) || /^\/remote(\?|\/|$)/i.test(href)) {
-                  return true;
-                }
-              }
-              if ((role === 'listitem' || role === 'option' || role === 'treeitem') && el.closest && el.closest('nav, aside, [role="navigation"]')) {
-                return cleanText(el.textContent).length > 1;
-              }
-              return false;
-            }, 120);
+            const rows = Array.from(root.querySelectorAll('[data-testid="conversation-row-sidebar"]'));
+            if (rows.length === 0) {
+              return cachedConversations;
+            }
 
             const result = [];
             const seen = new Set();
-            links.forEach((el, idx) => {
-              const title = cleanText(el.textContent).split('\n')[0].slice(0, 80);
+            rows.forEach((row, idx) => {
+              const anchor = row.querySelector('a') || row.querySelector('button');
+              if (!anchor) return;
+              const ariaTitle = cleanText(anchor.getAttribute('aria-label'));
+              const fallbackText = cleanText(anchor.textContent).replace(/(\d+\s*(?:s|m|h|d|w|mo|y))$/i, '').trim();
+              const title = ariaTitle || fallbackText;
               if (!title || title.length < 2) return;
-              const href = el.getAttribute('href') || '';
-              const fullUrl = href ? new URL(href, window.location.origin).href : '';
-              const key = fullUrl || title;
+
+              const href = anchor.getAttribute('href') || '';
+              let fullUrl = '';
+              if (href && !href.startsWith('#')) {
+                try {
+                  fullUrl = new URL(href, window.location.origin).href;
+                } catch (_) {}
+              }
+
+              const updatedLabel = extractRelativeTime(row, title);
+              const key = fullUrl || (title + '#' + idx);
               if (seen.has(key)) return;
               seen.add(key);
+
               const isActive = (fullUrl && fullUrl === window.location.href) ||
-                el.getAttribute('aria-current') === 'page' ||
-                el.getAttribute('aria-selected') === 'true';
+                anchor.getAttribute('aria-current') === 'page' ||
+                row.getAttribute('data-active') === 'true';
+
               result.push({
-                id: 'conv-' + idx + '-' + title.slice(0, 16),
+                id: 'conv-' + idx + '-' + title.slice(0, 24),
                 title: title,
                 url: fullUrl,
+                projectName: '',
                 preview: '',
-                updatedLabel: '',
+                updatedLabel: updatedLabel,
                 isActive: isActive
               });
             });
@@ -398,11 +395,20 @@ object AntigravityBridgeScript {
 
           function extractMessages() {
             const root = getAppRoot();
+            // Do not mistake the sidebar conversation list screen for messages
+            const sidebarList = root.querySelector('[data-testid="conversation-list-sidebar"]');
+            const sidebarVisible = sidebarList && isVisible(sidebarList) &&
+              sidebarList.getBoundingClientRect().width > window.innerWidth * 0.6;
+            if (sidebarVisible) {
+              return [];
+            }
+
             let turns = collectDeep(root, el => {
+              if (sidebarList && sidebarList.contains(el)) return false;
               const roleAttr = (el.getAttribute('data-message-author-role') || el.getAttribute('data-role') || el.getAttribute('data-author') || '').toLowerCase();
               if (roleAttr === 'user' || roleAttr === 'assistant' || roleAttr === 'model' || roleAttr === 'agent') return true;
               const testId = (el.getAttribute('data-testid') || '').toLowerCase();
-              if (testId.includes('message') || testId.includes('turn') || testId.includes('step') || testId.includes('response')) {
+              if (testId.includes('message') || testId.includes('turn') || testId.includes('response')) {
                 return isVisible(el) && cleanText(el.textContent).length > 0;
               }
               return false;
@@ -410,6 +416,7 @@ object AntigravityBridgeScript {
 
             if (turns.length === 0) {
               turns = collectDeep(root, el => {
+                if (sidebarList && sidebarList.contains(el)) return false;
                 const tag = (el.tagName || '').toLowerCase();
                 const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
                 if (tag === 'article') return isVisible(el);
@@ -428,10 +435,10 @@ object AntigravityBridgeScript {
               return true;
             });
 
-            const composer = findComposerInput();
+            const inputBox = root.querySelector('[data-testid="agent-input-box"]');
             const messages = [];
             topTurns.forEach((el, idx) => {
-              if (composer && (el === composer || el.contains(composer))) return;
+              if (inputBox && (el === inputBox || el.contains(inputBox) || inputBox.contains(el))) return;
 
               const roleHint = (
                 (el.getAttribute('data-message-author-role') || '') + ' ' +
@@ -462,9 +469,62 @@ object AntigravityBridgeScript {
             return messages;
           }
 
-          function extractQuota() {
-            const root = getAppRoot();
-            const meters = collectDeep(root, el => {
+          function readModelsFromOpenPanel(activeModel) {
+            const panel = document.querySelector('[data-testid="model-selector-panel"]');
+            if (!panel) return [];
+            const items = [];
+            const seen = new Set();
+
+            const buttons = Array.from(panel.querySelectorAll('button.agy-overlay-item'));
+            buttons.forEach((btn, idx) => {
+              const fullText = cleanText(btn.textContent);
+              if (!fullText || /^view usage$/i.test(fullText)) return;
+
+              const groupSpan = btn.querySelector('[data-testid="model-selector-effort-group"]');
+              if (groupSpan) {
+                const name = cleanText(groupSpan.textContent);
+                if (!name || seen.has(name)) return;
+                seen.add(name);
+                const siblingSpans = Array.from(btn.querySelectorAll('span'))
+                  .map(s => cleanText(s.textContent))
+                  .filter(t => t && t !== name && /^(Low|Medium|High|Extra|Fast)$/i.test(t));
+                const tier = siblingSpans[0] || '';
+                const isSelected = activeModel.toLowerCase().startsWith(name.toLowerCase());
+                items.push({
+                  id: 'effort-' + idx + '-' + name,
+                  name: name,
+                  tier: tier,
+                  description: '',
+                  hasEffortLevels: true,
+                  effortOptions: ['Low', 'Medium', 'High', 'Extra'],
+                  isSelected: isSelected
+                });
+                return;
+              }
+
+              if (btn.getAttribute('data-testid') === 'model-selector-item' || btn.getAttribute('role') === 'menuitem') {
+                const name = fullText;
+                if (!name || seen.has(name)) return;
+                seen.add(name);
+                const isSelected = activeModel.toLowerCase().includes(name.toLowerCase().replace(/\s*\([^)]+\)\s*$/, ''));
+                items.push({
+                  id: 'item-' + idx + '-' + name,
+                  name: name,
+                  tier: '',
+                  description: '',
+                  hasEffortLevels: false,
+                  effortOptions: [],
+                  isSelected: isSelected
+                });
+              }
+            });
+
+            return items;
+          }
+
+          function extractQuotaFromScope(scope) {
+            if (!scope) return null;
+            const meters = collectDeep(scope, el => {
               const role = el.getAttribute('role') || '';
               const aria = (el.getAttribute('aria-label') || '').toLowerCase();
               const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
@@ -472,7 +532,7 @@ object AntigravityBridgeScript {
               return role === 'progressbar' || (el.tagName || '').toLowerCase() === 'meter' ||
                 aria.includes('quota') || aria.includes('usage') || aria.includes('limit') ||
                 cls.includes('quota') || cls.includes('usage') || tid.includes('quota') || tid.includes('usage');
-            }, 30);
+            }, 40);
 
             for (const el of meters) {
               const now = parseFloat(el.getAttribute('aria-valuenow') || el.value || '');
@@ -483,22 +543,29 @@ object AntigravityBridgeScript {
               if (pct !== null || /quota|usage|remaining|limit|reset/i.test(txt)) {
                 return {
                   usedPercent: pct,
-                  remainingLabel: txt.slice(0, 80),
+                  remainingLabel: txt.slice(0, 90),
                   resetLabel: '',
                   planLabel: 'Antigravity',
-                  rawSummary: txt.slice(0, 140),
+                  rawSummary: txt.slice(0, 180),
                   isLive: true
                 };
               }
             }
-            return {
-              usedPercent: null,
-              remainingLabel: '',
-              resetLabel: '',
-              planLabel: 'Antigravity',
-              rawSummary: '',
-              isLive: false
-            };
+
+            const dialogText = cleanText(scope.innerText || '');
+            if (dialogText && /(usage|quota|limit|remaining|reset|credits|%)/i.test(dialogText)) {
+              const pctMatch = dialogText.match(/(\d{1,3})\s*%/);
+              const resetMatch = dialogText.match(/(resets?\s+[^\n.]{2,40})/i);
+              return {
+                usedPercent: pctMatch ? parseFloat(pctMatch[1]) : null,
+                remainingLabel: dialogText.slice(0, 90),
+                resetLabel: resetMatch ? resetMatch[1] : '',
+                planLabel: 'Antigravity',
+                rawSummary: dialogText.slice(0, 200),
+                isLive: true
+              };
+            }
+            return null;
           }
 
           function detectStreaming() {
@@ -533,20 +600,27 @@ object AntigravityBridgeScript {
             const authRequired = detectAuthRequired();
             const composer = findComposerInput();
             const modelBtn = findModelSelectorButton();
-            const activeModel = modelBtn ? cleanText(modelBtn.textContent) : '';
+            const activeModel = parseActiveModelName(modelBtn);
+            const activeProject = parseAriaCurrentValue('[data-testid="project-selector-trigger"]');
+            const permissionsPreset = parseAriaCurrentValue('[data-testid="permissions-selector-trigger"]');
             const isStreaming = detectStreaming();
             const messages = authRequired ? [] : extractMessages();
             if (isStreaming && messages.length > 0 && messages[messages.length - 1].role === 'assistant') {
               messages[messages.length - 1].isStreaming = true;
             }
             const conversations = authRequired ? [] : extractConversations();
-            const quota = authRequired ? { isLive: false } : extractQuota();
 
-            let title = cleanText(document.title).replace(/\s*[-|•]\s*Antigravity.*$/i, '').trim();
-            const root = getAppRoot();
-            const headerTitle = root.querySelector('header h1, header [role="heading"], [class*="conversation-title" i], [data-testid*="title" i]');
-            if (headerTitle && cleanText(headerTitle.textContent)) {
-              title = cleanText(headerTitle.textContent);
+            const liveQuota = authRequired ? null : extractQuotaFromScope(getAppRoot());
+            if (liveQuota) cachedQuota = liveQuota;
+
+            const activeConv = conversations.find(c => c.isActive);
+            let title = activeConv ? activeConv.title : 'Antigravity';
+            if (!activeConv) {
+              const headerHeading = getAppRoot().querySelector('header h1, header [role="heading"]');
+              const rawHeader = headerHeading ? cleanText(headerHeading.textContent) : '';
+              if (rawHeader && !/google antigravity|remote conversations/i.test(rawHeader)) {
+                title = rawHeader;
+              }
             }
 
             if (activeModel && cachedModels.length === 0) {
@@ -554,33 +628,49 @@ object AntigravityBridgeScript {
                 id: activeModel,
                 name: activeModel,
                 tier: '',
-                description: 'Active model on Antigravity',
+                description: '',
+                hasEffortLevels: false,
+                effortOptions: [],
                 isSelected: true
               }];
             } else if (activeModel) {
-              cachedModels = cachedModels.map(m => Object.assign({}, m, { isSelected: m.name === activeModel }));
+              cachedModels = cachedModels.map(m => {
+                const selected = activeModel.toLowerCase().startsWith(m.name.toLowerCase().replace(/\s*\([^)]+\)\s*$/, ''));
+                const effortMatch = selected ? activeModel.match(/\b(Low|Medium|High|Extra|Fast)\b/i) : null;
+                return Object.assign({}, m, {
+                  isSelected: selected,
+                  tier: (effortMatch && effortMatch[1]) ? effortMatch[1] : m.tier
+                });
+              });
             }
 
             return {
               url: window.location.href,
-              title: title || 'Antigravity',
+              title: title,
               authRequired: authRequired,
               isStreaming: isStreaming,
               activeModel: activeModel,
+              activeProject: activeProject,
+              permissionsPreset: permissionsPreset,
               models: cachedModels,
               conversations: conversations,
               messages: messages,
-              quota: quota,
+              quota: cachedQuota,
               composerReady: !!composer,
-              diagnosticsNote: 'turns=' + messages.length + ', chats=' + conversations.length + ', composer=' + (!!composer)
+              diagnosticsNote: 'turns=' + messages.length + ', chats=' + conversations.length + ', models=' + cachedModels.length + ', composer=' + (!!composer)
             };
           }
 
-          function syncNow() {
+          function syncNow(force) {
+            if (isInternalModalProbe && !force) return;
             try {
+              if (document.getElementById('af-error-container')) {
+                window.location.replace('https://antigravity.google.com/remote');
+                return;
+              }
               const snapshot = buildSnapshot();
               const json = JSON.stringify(snapshot);
-              if (json !== lastPayloadHash) {
+              if (force || json !== lastPayloadHash) {
                 lastPayloadHash = json;
                 if (window.AntigravityNative && window.AntigravityNative.onStateSnapshot) {
                   window.AntigravityNative.onStateSnapshot(json);
@@ -594,6 +684,7 @@ object AntigravityBridgeScript {
           }
 
           function scheduleSync() {
+            if (isInternalModalProbe) return;
             if (syncTimer) clearTimeout(syncTimer);
             syncTimer = setTimeout(syncNow, 220);
           }
@@ -617,24 +708,15 @@ object AntigravityBridgeScript {
             }
 
             setTimeout(() => {
-              const form = input.closest && input.closest('form');
-              const scope = form || input.parentElement?.parentElement || getAppRoot();
-              const sendBtns = collectDeep(scope, el => {
-                const t = (el.tagName || '').toLowerCase();
-                if (t !== 'button' && el.getAttribute('role') !== 'button') return false;
-                if (el.disabled || !isVisible(el)) return false;
-                const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
-                if (el.type === 'submit' || label.includes('send') || label.includes('submit') || label.includes('ask')) return true;
-                return false;
-              }, 15);
-
-              if (sendBtns.length > 0) {
-                sendBtns[sendBtns.length - 1].click();
+              const sendBtn = getAppRoot().querySelector('[data-testid="send-button"], button[aria-label="Send message"]');
+              if (sendBtn && !sendBtn.disabled && isVisible(sendBtn)) {
+                sendBtn.click();
               } else {
                 const enterEv = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true });
                 input.dispatchEvent(enterEv);
               }
-              scheduleSync();
+              setTimeout(() => syncNow(true), 250);
+              setTimeout(() => syncNow(true), 900);
             }, 90);
             return true;
           }
@@ -658,98 +740,189 @@ object AntigravityBridgeScript {
           function refreshModels() {
             const btn = findModelSelectorButton();
             if (!btn) return false;
-            btn.click();
+            const activeModel = parseActiveModelName(btn);
+            isInternalModalProbe = true;
+            const alreadyOpen = !!document.querySelector('[data-testid="model-selector-panel"]');
+            if (!alreadyOpen) btn.click();
+
             setTimeout(() => {
-              const items = getVisibleOverlayOptions();
-              const parsed = [];
-              const seen = new Set();
-              items.forEach((item, idx) => {
-                const lines = (item.innerText || '').split('\n').map(cleanText).filter(Boolean);
-                if (!lines.length) return;
-                const name = lines[0];
-                if (seen.has(name)) return;
-                seen.add(name);
-                parsed.push({
-                  id: 'model-' + idx + '-' + name,
-                  name: name,
-                  tier: '',
-                  description: lines.slice(1).join(' • ').slice(0, 100),
-                  isSelected: item.getAttribute('aria-checked') === 'true' || item.getAttribute('aria-selected') === 'true'
-                });
-              });
+              const parsed = readModelsFromOpenPanel(activeModel);
               if (parsed.length > 0) cachedModels = parsed;
               dismissOverlays();
-              lastPayloadHash = '';
-              syncNow();
+              setTimeout(() => {
+                isInternalModalProbe = false;
+                syncNow(true);
+              }, 120);
             }, 260);
             return true;
           }
 
-          function selectModel(modelName) {
+          function selectModel(modelName, effortTier) {
             const btn = findModelSelectorButton();
             if (!btn) return false;
-            btn.click();
+            isInternalModalProbe = true;
+            const alreadyOpen = !!document.querySelector('[data-testid="model-selector-panel"]');
+            if (!alreadyOpen) btn.click();
+
             setTimeout(() => {
-              const items = getVisibleOverlayOptions();
-              const target = items.find(el => cleanText(el.textContent).toLowerCase().includes(modelName.toLowerCase()));
-              if (target) {
-                target.click();
-              } else {
+              const panel = document.querySelector('[data-testid="model-selector-panel"]');
+              if (!panel) {
                 dismissOverlays();
+                isInternalModalProbe = false;
+                syncNow(true);
+                return;
               }
+
+              const targetLower = (modelName || '').toLowerCase();
+              // 1. Check direct model-selector-item buttons first (e.g. GPT-OSS 120B)
+              const directItems = Array.from(panel.querySelectorAll('button[data-testid="model-selector-item"]'));
+              const directMatch = directItems.find(b => cleanText(b.textContent).toLowerCase().includes(targetLower));
+              if (directMatch) {
+                directMatch.click();
+                setTimeout(() => {
+                  dismissOverlays();
+                  isInternalModalProbe = false;
+                  syncNow(true);
+                }, 220);
+                return;
+              }
+
+              // 2. Check two-step effort-group buttons (e.g. Gemini 4 Neon -> High/Medium/Low/Extra)
+              const groupSpans = Array.from(panel.querySelectorAll('[data-testid="model-selector-effort-group"]'));
+              const groupMatch = groupSpans.find(s => cleanText(s.textContent).toLowerCase() === targetLower) ||
+                groupSpans.find(s => cleanText(s.textContent).toLowerCase().includes(targetLower));
+
+              if (!groupMatch) {
+                dismissOverlays();
+                isInternalModalProbe = false;
+                syncNow(true);
+                return;
+              }
+
+              const groupBtn = groupMatch.closest('button') || groupMatch;
+              groupBtn.click();
+
+              // 3. Pick effort tier in the sub-panel
               setTimeout(() => {
-                lastPayloadHash = '';
-                syncNow();
-              }, 240);
+                const optionSpans = Array.from(document.querySelectorAll('[data-testid="model-selector-effort-option"]'))
+                  .filter(isVisible);
+                const desiredTier = (effortTier || 'Medium').toLowerCase();
+                const optionMatch =
+                  optionSpans.find(s => cleanText(s.textContent).toLowerCase() === desiredTier) ||
+                  optionSpans.find(s => cleanText(s.textContent).toLowerCase() === 'medium') ||
+                  optionSpans[0];
+
+                if (optionMatch) {
+                  const optBtn = optionMatch.closest('button') || optionMatch;
+                  optBtn.click();
+                } else {
+                  dismissOverlays();
+                }
+
+                setTimeout(() => {
+                  dismissOverlays();
+                  isInternalModalProbe = false;
+                  syncNow(true);
+                }, 260);
+              }, 260);
+            }, 260);
+            return true;
+          }
+
+          function refreshQuota() {
+            const btn = findModelSelectorButton();
+            if (!btn) {
+              syncNow(true);
+              return false;
+            }
+            isInternalModalProbe = true;
+            const alreadyOpen = !!document.querySelector('[data-testid="model-selector-panel"]');
+            if (!alreadyOpen) btn.click();
+
+            setTimeout(() => {
+              const panel = document.querySelector('[data-testid="model-selector-panel"]');
+              const usageBtn = panel && Array.from(panel.querySelectorAll('button.agy-overlay-item'))
+                .find(b => /view usage/i.test(cleanText(b.textContent)));
+
+              if (!usageBtn) {
+                dismissOverlays();
+                isInternalModalProbe = false;
+                syncNow(true);
+                return;
+              }
+
+              usageBtn.click();
+              setTimeout(() => {
+                const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-testid="bottom-sheet"]'))
+                  .filter(isVisible);
+                for (let i = dialogs.length - 1; i >= 0; i--) {
+                  const parsed = extractQuotaFromScope(dialogs[i]);
+                  if (parsed) {
+                    cachedQuota = parsed;
+                    break;
+                  }
+                }
+                dismissOverlays();
+                setTimeout(() => {
+                  isInternalModalProbe = false;
+                  syncNow(true);
+                }, 160);
+              }, 500);
             }, 260);
             return true;
           }
 
           function startNewChat() {
-            const newBtns = collectDeep(getAppRoot(), el => {
-              const tag = (el.tagName || '').toLowerCase();
-              const role = el.getAttribute('role') || '';
-              if (tag !== 'button' && tag !== 'a' && role !== 'button') return false;
-              const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
-              return label.includes('new chat') || label.includes('new conversation') || label.includes('start new');
-            }, 15);
-            if (newBtns.length > 0) {
-              newBtns[0].click();
-              setTimeout(() => { lastPayloadHash = ''; syncNow(); }, 300);
+            const root = getAppRoot();
+            const newBtn = root.querySelector('button[aria-label="New Conversation"], a[aria-label="New Conversation in Project"]');
+            if (newBtn && isVisible(newBtn)) {
+              newBtn.click();
+              setTimeout(() => syncNow(true), 300);
               return true;
             }
             window.location.href = 'https://antigravity.google.com/remote';
             return true;
           }
 
-          function selectConversation(url, title) {
+          function clickSidebarRow(url, title) {
             const root = getAppRoot();
-            if (url) {
-              const linkByHref = collectDeep(root, el => {
-                if ((el.tagName || '').toLowerCase() !== 'a') return false;
-                const h = el.getAttribute('href') || '';
-                try {
-                  return h && new URL(h, window.location.origin).href === url;
-                } catch (_) {
-                  return false;
-                }
-              }, 5)[0];
-              if (linkByHref) {
-                linkByHref.click();
-                setTimeout(() => { lastPayloadHash = ''; syncNow(); }, 350);
+            const rows = Array.from(root.querySelectorAll('[data-testid="conversation-row-sidebar"]'));
+            const targetTitle = (title || '').trim().toLowerCase();
+
+            for (const row of rows) {
+              const anchor = row.querySelector('a') || row.querySelector('button');
+              if (!anchor) continue;
+              const aria = cleanText(anchor.getAttribute('aria-label')).toLowerCase();
+              const href = anchor.getAttribute('href') || '';
+              let fullUrl = '';
+              if (href) {
+                try { fullUrl = new URL(href, window.location.origin).href; } catch (_) {}
+              }
+              if ((url && fullUrl === url) || (targetTitle && aria === targetTitle)) {
+                anchor.click();
+                setTimeout(() => syncNow(true), 300);
+                setTimeout(() => syncNow(true), 900);
+                setTimeout(() => syncNow(true), 1800);
                 return true;
               }
             }
-            if (title) {
-              const candidates = collectDeep(root, el => {
-                const txt = cleanText(el.textContent);
-                return txt && txt.toLowerCase().includes(title.toLowerCase());
-              }, 30);
-              if (candidates.length > 0) {
-                candidates[candidates.length - 1].click();
-                setTimeout(() => { lastPayloadHash = ''; syncNow(); }, 350);
-                return true;
-              }
+            return false;
+          }
+
+          function selectConversation(url, title) {
+            if (clickSidebarRow(url, title)) {
+              return true;
+            }
+            // If currently inside a thread on mobile, navigate back to the sidebar first, then click the row
+            const backBtn = getAppRoot().querySelector('button[aria-label="Back"], button[aria-label*="Conversations" i]');
+            if (backBtn && isVisible(backBtn)) {
+              backBtn.click();
+              setTimeout(() => {
+                if (!clickSidebarRow(url, title) && url && url.startsWith('https://antigravity.google.com/remote')) {
+                  window.location.href = url;
+                }
+              }, 320);
+              return true;
             }
             if (url && url.startsWith('https://antigravity.google.com/remote')) {
               window.location.href = url;
@@ -759,21 +932,15 @@ object AntigravityBridgeScript {
           }
 
           function triggerFileUpload() {
-            const fileInput = collectDeep(getAppRoot(), el =>
-              (el.tagName || '').toLowerCase() === 'input' && el.type === 'file', 5
-            )[0];
+            const root = getAppRoot();
+            const fileInput = root.querySelector('[data-testid="agent-input-box"] input[type="file"], input[type="file"]');
             if (fileInput) {
               fileInput.click();
               return true;
             }
-            const plusBtns = collectDeep(getAppRoot(), el => {
-              const tag = (el.tagName || '').toLowerCase();
-              if (tag !== 'button' && el.getAttribute('role') !== 'button') return false;
-              const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
-              return label.includes('attach') || label.includes('upload') || label.includes('add file') || label === '+';
-            }, 15);
-            if (plusBtns.length > 0) {
-              plusBtns[0].click();
+            const addBtn = root.querySelector('button[aria-label="Add context"]');
+            if (addBtn && isVisible(addBtn)) {
+              addBtn.click();
               return true;
             }
             return false;
@@ -819,7 +986,6 @@ object AntigravityBridgeScript {
                 }
               }
 
-              // Flatten pure single-child wrapper <div>s without semantic attributes
               if (tag === 'div' && !tid && !role && !aria && !el.id && !ownText && expanded === null && kids.length === 1) {
                 return kids[0];
               }
@@ -861,28 +1027,29 @@ object AntigravityBridgeScript {
 
           window.__agBridge = {
             version: BRIDGE_VERSION,
-            syncNow: syncNow,
+            syncNow: () => syncNow(true),
             sendPrompt: sendPrompt,
             stopGeneration: stopGeneration,
             refreshModels: refreshModels,
             selectModel: selectModel,
+            refreshQuota: refreshQuota,
             startNewChat: startNewChat,
             selectConversation: selectConversation,
             triggerFileUpload: triggerFileUpload,
             dumpDomSnapshot: dumpDomSnapshot
           };
 
-          syncNow();
-          setTimeout(syncNow, 900);
-          setTimeout(syncNow, 2200);
+          syncNow(true);
+          setTimeout(() => syncNow(true), 900);
+          setTimeout(() => syncNow(true), 2200);
           let hydrateTicks = 0;
           const hydrateInterval = setInterval(() => {
             hydrateTicks++;
-            syncNow();
-            if (hydrateTicks >= 6 || document.querySelector('[data-testid="mobile-layout"]')) {
+            syncNow(false);
+            if (hydrateTicks >= 6 || document.querySelector('[data-testid="model-selector-trigger"]')) {
               clearInterval(hydrateInterval);
             }
-          }, 2000);
+          }, 1800);
         })();
     """.trimIndent()
 

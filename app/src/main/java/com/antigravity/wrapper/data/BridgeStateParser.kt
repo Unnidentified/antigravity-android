@@ -2,9 +2,37 @@ package com.antigravity.wrapper.data
 
 /**
  * Converts JSON snapshots emitted by the headless Antigravity DOM bridge into
- * strongly-typed native UI models.
+ * strongly-typed native UI models, normalizing model names/tiers and titles consistently.
  */
 object BridgeStateParser {
+
+    private val TRAILING_TIER_PAREN_REGEX =
+        Regex("^(.+?)\\s*\\((Low|Medium|High|Extra|Fast)\\)\\s*$", RegexOption.IGNORE_CASE)
+
+    fun normalizeModelNameAndTier(rawName: String, rawTier: String): Pair<String, String> {
+        val cleanName = rawName.trim()
+        val cleanTier = rawTier.trim()
+        if (cleanTier.isNotBlank()) {
+            return cleanName to cleanTier
+        }
+        val match = TRAILING_TIER_PAREN_REGEX.matchEntire(cleanName)
+        return if (match != null) {
+            match.groupValues[1].trim() to match.groupValues[2].trim()
+        } else {
+            cleanName to ""
+        }
+    }
+
+    fun normalizeConversationTitle(rawTitle: String?): String {
+        val cleaned = rawTitle?.trim().orEmpty()
+        if (cleaned.isBlank() ||
+            cleaned.equals("Google Antigravity", ignoreCase = true) ||
+            cleaned.equals("Antigravity", ignoreCase = true)
+        ) {
+            return "Antigravity"
+        }
+        return cleaned
+    }
 
     fun parseSnapshot(json: String?): BridgeSnapshot? {
         if (json.isNullOrBlank()) return null
@@ -23,22 +51,30 @@ object BridgeStateParser {
                 id = id,
                 title = title,
                 url = SimpleJson.asString(obj["url"]).orEmpty(),
+                projectName = SimpleJson.asString(obj["projectName"]).orEmpty(),
                 preview = SimpleJson.asString(obj["preview"]).orEmpty(),
-                updatedLabel = SimpleJson.asString(obj["updatedLabel"]).orEmpty(),
+                updatedLabel = SimpleJson.asString(obj["updatedLabel"]).orEmpty().trim(),
                 isActive = SimpleJson.asBoolean(obj["isActive"]) == true
             )
         }
 
         val models = SimpleJson.asArray(root["models"]).orEmpty().mapNotNull { entry ->
             val obj = SimpleJson.asObject(entry) ?: return@mapNotNull null
-            val name = SimpleJson.asString(obj["name"])?.trim()?.takeIf { it.isNotBlank() }
+            val rawName = SimpleJson.asString(obj["name"])?.trim()?.takeIf { it.isNotBlank() }
                 ?: return@mapNotNull null
+            val rawTier = SimpleJson.asString(obj["tier"]).orEmpty()
+            val (name, tier) = normalizeModelNameAndTier(rawName, rawTier)
             val id = SimpleJson.asString(obj["id"])?.takeIf { it.isNotBlank() } ?: name
+            val effortOptions = SimpleJson.asArray(obj["effortOptions"])
+                .orEmpty()
+                .mapNotNull { SimpleJson.asString(it)?.trim()?.takeIf { s -> s.isNotEmpty() } }
             ModelOption(
                 id = id,
                 name = name,
-                tier = SimpleJson.asString(obj["tier"]).orEmpty(),
+                tier = tier,
                 description = SimpleJson.asString(obj["description"]).orEmpty(),
+                hasEffortLevels = SimpleJson.asBoolean(obj["hasEffortLevels"]) == true,
+                effortOptions = effortOptions,
                 isSelected = SimpleJson.asBoolean(obj["isSelected"]) == true
             )
         }
@@ -109,11 +145,12 @@ object BridgeStateParser {
 
         return BridgeSnapshot(
             currentUrl = SimpleJson.asString(root["url"]).orEmpty(),
-            conversationTitle = SimpleJson.asString(root["title"])?.trim()
-                ?.takeIf { it.isNotBlank() } ?: "Antigravity",
+            conversationTitle = normalizeConversationTitle(SimpleJson.asString(root["title"])),
             authRequired = SimpleJson.asBoolean(root["authRequired"]) == true,
             isStreaming = SimpleJson.asBoolean(root["isStreaming"]) == true,
             activeModelName = SimpleJson.asString(root["activeModel"]).orEmpty().trim(),
+            activeProject = SimpleJson.asString(root["activeProject"]).orEmpty().trim(),
+            permissionsPreset = SimpleJson.asString(root["permissionsPreset"]).orEmpty().trim(),
             models = models,
             conversations = conversations,
             messages = messages,

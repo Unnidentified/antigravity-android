@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,9 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Lock
@@ -113,7 +110,7 @@ fun AntigravityNativeApp(
         bridgeEngine.exportDomSnapshot { snapshotJson ->
             if (!snapshotJson.isNullOrBlank()) {
                 onCopyToClipboard("Antigravity DOM Snapshot", snapshotJson)
-                showToast("Sanitized DOM snapshot copied (${snapshotJson.length} chars)")
+                showToast("Sanitized DOM snapshot copied")
             } else {
                 showToast("Session still loading — try again in a moment")
             }
@@ -127,13 +124,20 @@ fun AntigravityNativeApp(
         viewModel.addOptimisticUserMessage(textToSend)
         bridgeEngine.sendPrompt(textToSend) { dispatched ->
             if (!dispatched) {
-                showToast("Session input not ready yet — tap Retry or check Diagnostics")
+                showToast("Session input not ready yet — check Diagnostics")
             }
         }
     }
 
+    val showHeadlessWebForAuth = uiState.bridgeStatus == BridgeStatus.AUTH_REQUIRED
+    val showWebOverlay = showHeadlessWebForAuth || settings.webInspectorMode
+
     LaunchedEffect(isDarkEffective) {
         onConfigureSystemBars(isDarkEffective)
+    }
+
+    LaunchedEffect(showWebOverlay) {
+        bridgeEngine.setInteractive(showWebOverlay)
     }
 
     LaunchedEffect(settings.keepScreenAwake, uiState.snapshot.isStreaming) {
@@ -147,8 +151,6 @@ fun AntigravityNativeApp(
         }
     }
 
-    val showHeadlessWebForAuth = uiState.bridgeStatus == BridgeStatus.AUTH_REQUIRED
-    val showWebOverlay = showHeadlessWebForAuth || settings.webInspectorMode
     val fontScale = settings.fontScalePercent / 100f
 
     AntigravityTheme(
@@ -161,9 +163,7 @@ fun AntigravityNativeApp(
                 .background(MaterialTheme.colorScheme.background)
         ) {
             // LAYER 0: Headless WebView engine host.
-            // Kept at real viewport dimensions behind the opaque native Compose UI so Chromium
-            // continues laying out and streaming live DOM updates; brought forward ONLY for
-            // Google Sign-In or explicit debug Web Inspector fallback.
+            // Focus-blocked and touch-blocked whenever hidden behind the native Compose UI.
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -255,6 +255,9 @@ fun AntigravityNativeApp(
                                 initialUrl = initialUrl
                             )
                         }
+                    },
+                    update = {
+                        bridgeEngine.setInteractive(showWebOverlay)
                     }
                 )
             }
@@ -289,13 +292,12 @@ fun AntigravityNativeApp(
                                 onSelectConversation = { conv ->
                                     triggerHaptic()
                                     scope.launch { drawerState.close() }
-                                    viewModel.clearOptimisticMessages()
+                                    viewModel.onStartConversationSwitch()
                                     bridgeEngine.selectConversation(conv.url, conv.title)
                                 },
                                 onRefreshChats = {
                                     triggerHaptic()
                                     bridgeEngine.syncNow()
-                                    showToast("Refreshing conversations…")
                                 },
                                 onOpenQuota = {
                                     triggerHaptic()
@@ -312,7 +314,6 @@ fun AntigravityNativeApp(
                     ) {
                         Scaffold(
                             containerColor = MaterialTheme.colorScheme.background,
-                            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
                             topBar = {
                                 ChatTopBar(
                                     conversationTitle = uiState.snapshot.conversationTitle,
@@ -326,6 +327,7 @@ fun AntigravityNativeApp(
                                     onOpenModelSelector = {
                                         triggerHaptic()
                                         viewModel.setModelSheetOpen(true)
+                                        viewModel.onStartModelRefresh()
                                         bridgeEngine.refreshModels()
                                     },
                                     onOpenQuotaSheet = {
@@ -342,7 +344,7 @@ fun AntigravityNativeApp(
                             bottomBar = {
                                 PromptComposerBar(
                                     text = uiState.composerText,
-                                    activeModelLabel = uiState.activeModelLabel,
+                                    activeModelLabel = uiState.activeModelLabel.ifBlank { "Model" },
                                     isStreaming = uiState.snapshot.isStreaming,
                                     enabled = uiState.bridgeStatus == BridgeStatus.CONNECTED,
                                     onTextChange = { viewModel.updateComposerText(it) },
@@ -358,6 +360,7 @@ fun AntigravityNativeApp(
                                     onOpenModelSelector = {
                                         triggerHaptic()
                                         viewModel.setModelSheetOpen(true)
+                                        viewModel.onStartModelRefresh()
                                         bridgeEngine.refreshModels()
                                     },
                                     onOpenQuickPrompts = {
@@ -376,6 +379,7 @@ fun AntigravityNativeApp(
                                     EmptyChatWelcome(
                                         bridgeStatus = uiState.bridgeStatus,
                                         activeModelLabel = uiState.activeModelLabel,
+                                        isSwitchingConversation = uiState.isSwitchingConversation,
                                         errorMessage = uiState.errorMessage,
                                         onSuggestionClick = { suggestion ->
                                             triggerHaptic()
@@ -424,6 +428,14 @@ fun AntigravityNativeApp(
                                         }
                                     }
                                 }
+
+                                // Positioned cleanly inside content area so it ALWAYS clears above the composer bar
+                                SnackbarHost(
+                                    hostState = snackbarHostState,
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                )
                             }
                         }
                     }
@@ -433,32 +445,34 @@ fun AntigravityNativeApp(
                         ModelSelectorSheet(
                             models = uiState.availableModels,
                             activeModelLabel = uiState.activeModelLabel,
-                            onSelectModel = { option ->
+                            isRefreshing = uiState.isRefreshingModels,
+                            onSelectModel = { modelName, effortTier ->
                                 triggerHaptic()
-                                bridgeEngine.selectModel(option.name)
-                                showToast("Switching to ${option.name}")
+                                viewModel.onSelectModelOptimistic(modelName, effortTier)
+                                bridgeEngine.selectModel(modelName, effortTier)
                             },
                             onRefreshModels = {
                                 triggerHaptic()
+                                viewModel.onStartModelRefresh()
                                 bridgeEngine.refreshModels()
-                                showToast("Syncing models…")
                             },
                             onDismiss = { viewModel.setModelSheetOpen(false) }
                         )
                     }
 
-                    // Native Usage Quota Bottom Sheet
+                    // Native Usage Quota Bottom Sheet (with inline refresh status, zero hidden snackbars)
                     if (uiState.isQuotaSheetOpen) {
                         UsageQuotaSheet(
                             quota = uiState.snapshot.quota,
                             activeModelLabel = uiState.activeModelLabel,
                             messageCount = displayedMessages.size,
-                            conversationCount = uiState.snapshot.conversations.size,
                             bridgeStatus = uiState.bridgeStatus,
+                            isRefreshing = uiState.isRefreshingQuota,
+                            statusMessage = uiState.quotaStatusMessage,
                             onRefresh = {
                                 triggerHaptic()
-                                bridgeEngine.syncNow()
-                                showToast("Refreshing quota…")
+                                viewModel.onStartQuotaRefresh()
+                                bridgeEngine.refreshQuota()
                             },
                             onDismiss = { viewModel.setQuotaSheetOpen(false) }
                         )
@@ -515,6 +529,7 @@ fun AntigravityNativeApp(
                             },
                             onCopyDomSnapshot = {
                                 triggerHaptic()
+                                viewModel.setSettingsSheetOpen(false)
                                 copyDomSnapshot()
                             },
                             onSignOut = {

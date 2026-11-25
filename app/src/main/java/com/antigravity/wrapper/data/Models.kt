@@ -39,6 +39,7 @@ data class ChatConversation(
     val id: String,
     val title: String,
     val url: String = "",
+    val projectName: String = "",
     val preview: String = "",
     val updatedLabel: String = "",
     val isActive: Boolean = false
@@ -77,8 +78,17 @@ data class ModelOption(
     val name: String,
     val tier: String = "",
     val description: String = "",
+    val hasEffortLevels: Boolean = false,
+    val effortOptions: List<String> = emptyList(),
     val isSelected: Boolean = false
-)
+) {
+    val displayLabel: String
+        get() = if (tier.isNotBlank() && !name.endsWith(tier, ignoreCase = true)) {
+            "$name $tier"
+        } else {
+            name
+        }
+}
 
 data class QuotaInfo(
     val usedPercent: Float? = null,
@@ -91,10 +101,12 @@ data class QuotaInfo(
 
 data class BridgeSnapshot(
     val currentUrl: String = "",
-    val conversationTitle: String = "New Chat",
+    val conversationTitle: String = "Antigravity",
     val authRequired: Boolean = false,
     val isStreaming: Boolean = false,
     val activeModelName: String = "",
+    val activeProject: String = "",
+    val permissionsPreset: String = "",
     val models: List<ModelOption> = emptyList(),
     val conversations: List<ChatConversation> = emptyList(),
     val messages: List<ChatMessage> = emptyList(),
