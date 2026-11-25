@@ -2,25 +2,32 @@ package com.antigravity.wrapper.bridge
 
 /**
  * Self-contained JavaScript engine injected into the headless Antigravity WebView.
- * Observes DOM and open Shadow DOM mutations, extracts structured chat state
- * (conversations, messages with lossless Markdown/LaTeX, collapsible reasoning,
- * artifacts, active model, model list, usage quota), drives native actions,
- * and exports a sanitized structural DOM snapshot for selector calibration.
+ * Targets `[data-testid="mobile-layout"]` and React bottom-sheet portals (`.agy-overlay-item`),
+ * observes DOM/Shadow-DOM mutations, extracts structured chat state (conversations, messages
+ * with lossless Markdown/LaTeX, collapsible reasoning, artifacts, active model, model list,
+ * usage quota), drives native actions, and exports a flattened structural DOM snapshot.
  */
 object AntigravityBridgeScript {
 
     fun buildBootstrapScript(): String = """
         (function() {
-          if (window.__agBridge && window.__agBridge.version === 1) {
+          if (window.__agBridge && window.__agBridge.version === 2) {
             window.__agBridge.syncNow();
             return;
           }
 
-          const BRIDGE_VERSION = 1;
+          const BRIDGE_VERSION = 2;
           let cachedModels = [];
           let cachedConversations = [];
           let syncTimer = null;
           let lastPayloadHash = '';
+
+          function getAppRoot() {
+            return document.querySelector('[data-testid="mobile-layout"]') ||
+              document.querySelector('ga-remote-agents') ||
+              document.querySelector('main#main-content') ||
+              document.body;
+          }
 
           function isVisible(el) {
             if (!el || el.nodeType !== 1) return false;
@@ -32,14 +39,21 @@ object AntigravityBridgeScript {
             return rect.width > 0 || rect.height > 0;
           }
 
+          function isGoogleBar(el) {
+            if (!el || el.nodeType !== 1) return false;
+            const cls = typeof el.className === 'string' ? el.className : '';
+            return el.id === 'gb' || cls.includes('boqOnegooglelite') || cls.includes('header-feedback-btn');
+          }
+
           function collectDeep(root, predicate, limit) {
             const out = [];
-            const max = limit || 400;
-            const stack = [root || document.body];
+            const max = limit || 2000;
+            const stack = [root || getAppRoot()];
             while (stack.length > 0 && out.length < max) {
               const cur = stack.pop();
               if (!cur) continue;
               if (cur.nodeType === 1) {
+                if (isGoogleBar(cur)) continue;
                 try {
                   if (predicate(cur)) out.push(cur);
                 } catch (_) {}
@@ -71,9 +85,24 @@ object AntigravityBridgeScript {
             return cleanText(el.textContent);
           }
 
+          function isReasoningElement(el) {
+            if (!el || el.nodeType !== 1) return false;
+            const tag = (el.tagName || '').toLowerCase();
+            const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
+            const testId = (el.getAttribute('data-testid') || '').toLowerCase();
+            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+            if (tag === 'details') return true;
+            if (cls.includes('thought') || cls.includes('thinking') || cls.includes('reasoning') ||
+                testId.includes('thought') || testId.includes('reason') ||
+                aria.includes('thought') || aria.includes('reasoning')) {
+              return true;
+            }
+            return false;
+          }
+
           function nodeToMarkdown(node, depth) {
             if (!node) return '';
-            if (depth > 40) return '';
+            if (depth > 48) return '';
             if (node.nodeType === 3) {
               return node.nodeValue || '';
             }
@@ -84,9 +113,8 @@ object AntigravityBridgeScript {
             if (node.getAttribute('aria-hidden') === 'true' && !node.classList.contains('katex')) return '';
             if (tag === 'button' && cleanText(node.textContent).length <= 24) return '';
 
-            // KaTeX / MathJax lossless LaTeX recovery
             const cls = (typeof node.className === 'string' ? node.className : '').toLowerCase();
-            if (cls.includes('katex-display') || tag === 'mjx-container' && node.getAttribute('display') === 'true') {
+            if (cls.includes('katex-display') || (tag === 'mjx-container' && node.getAttribute('display') === 'true')) {
               const tex = extractTexFromMathNode(node);
               return tex ? ('\n\n$$\n' + tex + '\n$$\n\n') : '';
             }
@@ -95,10 +123,8 @@ object AntigravityBridgeScript {
               return tex ? (' $' + tex + '$ ') : '';
             }
 
-            // Skip reasoning blocks here (extracted separately)
             if (isReasoningElement(node)) return '';
 
-            // Fenced code blocks
             if (tag === 'pre') {
               const codeEl = node.querySelector('code') || node;
               const codeCls = (codeEl.className || '').toString();
@@ -188,33 +214,15 @@ object AntigravityBridgeScript {
           }
 
           function normalizeMarkdown(md) {
-            return (md || '')
-              .replace(/\n{3,}/g, '\n\n')
-              .trim();
-          }
-
-          function isReasoningElement(el) {
-            if (!el || el.nodeType !== 1) return false;
-            const tag = (el.tagName || '').toLowerCase();
-            const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
-            const testId = (el.getAttribute('data-testid') || '').toLowerCase();
-            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-            if (tag === 'details') return true;
-            if (cls.includes('thought') || cls.includes('thinking') || cls.includes('reasoning') ||
-                testId.includes('thought') || testId.includes('reason') ||
-                aria.includes('thought') || aria.includes('reasoning')) {
-              return true;
-            }
-            return false;
+            return (md || '').replace(/\n{3,}/g, '\n\n').trim();
           }
 
           function extractReasoningBlocks(container, msgIndex) {
             const blocks = [];
             const seen = new Set();
-            const nodes = collectDeep(container, el => isReasoningElement(el), 30);
+            const nodes = collectDeep(container, el => isReasoningElement(el), 40);
             nodes.forEach((el, idx) => {
               if (seen.has(el)) return;
-              // Skip nested matches inside an already captured reasoning node
               for (const prev of seen) {
                 if (prev.contains && prev.contains(el)) return;
               }
@@ -226,7 +234,6 @@ object AntigravityBridgeScript {
               const duration = durationMatch ? durationMatch[1] : '';
               const title = rawSummary || 'Reasoning';
 
-              // Extract body excluding the summary trigger
               const clone = el.cloneNode(true);
               const cloneSummary = clone.querySelector('summary, [role="button"], button');
               if (cloneSummary && cloneSummary.parentNode) {
@@ -249,7 +256,6 @@ object AntigravityBridgeScript {
           function extractArtifacts(container, msgIndex) {
             const artifacts = [];
             const text = container.innerText || '';
-            // Match file diff summaries like "31 files changed +5240 -323"
             const diffMatch = text.match(/(\d+\s+files?\s+changed)\s*\+(\d+)\s*[-−](\d+)/i);
             if (diffMatch) {
               artifacts.push({
@@ -266,7 +272,8 @@ object AntigravityBridgeScript {
           }
 
           function findComposerInput() {
-            const candidates = collectDeep(document.body, el => {
+            const root = getAppRoot();
+            const candidates = collectDeep(root, el => {
               const tag = (el.tagName || '').toLowerCase();
               if (tag === 'textarea') return !el.disabled && !el.readOnly && isVisible(el);
               if (el.isContentEditable && isVisible(el)) return true;
@@ -274,25 +281,25 @@ object AntigravityBridgeScript {
               return false;
             }, 30);
             if (!candidates.length) return null;
-            // Prefer the input closest to the bottom of the viewport
             candidates.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
             return candidates[0];
           }
 
           function findModelSelectorButton() {
+            const root = getAppRoot();
             const composer = findComposerInput();
             const composerRect = composer ? composer.getBoundingClientRect() : null;
-            const buttons = collectDeep(document.body, el => {
+            const buttons = collectDeep(root, el => {
               const tag = (el.tagName || '').toLowerCase();
               const role = el.getAttribute('role') || '';
               if (tag !== 'button' && role !== 'button' && role !== 'combobox') return false;
               if (!isVisible(el)) return false;
               const txt = cleanText(el.textContent);
-              if (!txt || txt.length > 48) return false;
+              if (!txt || txt.length > 56) return false;
               const hasModelKeyword = /(gemini|claude|gpt|o1|o3|sonnet|opus|haiku|flash|pro|neon|ultra|model)/i.test(txt);
               const hasPopup = el.getAttribute('aria-haspopup') === 'listbox' || el.getAttribute('aria-haspopup') === 'menu';
               return hasModelKeyword || (hasPopup && composerRect && Math.abs(el.getBoundingClientRect().top - composerRect.bottom) < 120);
-            }, 40);
+            }, 60);
             if (!buttons.length) return null;
             if (composerRect) {
               buttons.sort((a, b) => {
@@ -304,19 +311,45 @@ object AntigravityBridgeScript {
             return buttons[0];
           }
 
+          function getVisibleOverlayOptions() {
+            // Antigravity mobile uses React portals with [data-testid="bottom-sheet"] + .agy-overlay-item
+            const sheetItems = collectDeep(document.body, el => {
+              if (!isVisible(el)) return false;
+              const cls = typeof el.className === 'string' ? el.className : '';
+              const role = el.getAttribute('role') || '';
+              if (cls.includes('agy-overlay-item')) return true;
+              if (role === 'menuitem' || role === 'option' || role === 'menuitemradio') return true;
+              return false;
+            }, 80);
+            return sheetItems;
+          }
+
+          function dismissOverlays() {
+            const backdrop = document.querySelector('[data-testid="bottom-sheet-backdrop"]');
+            if (backdrop && isVisible(backdrop)) {
+              backdrop.click();
+            }
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          }
+
           function extractConversations() {
-            const links = collectDeep(document.body, el => {
+            const root = getAppRoot();
+            const links = collectDeep(root, el => {
               const tag = (el.tagName || '').toLowerCase();
               const role = el.getAttribute('role') || '';
+              const tid = (el.getAttribute('data-testid') || '').toLowerCase();
+              if (tid.includes('conversation') || tid.includes('chat-item') || tid.includes('thread')) {
+                return cleanText(el.textContent).length > 1;
+              }
               if (tag === 'a') {
                 const href = el.getAttribute('href') || '';
-                if (/\/(c|chat|conversation|session|thread|project)\//i.test(href)) return true;
+                if (/\/(c|chat|conversation|session|thread|project|remote)/i.test(href)) return true;
               }
               if ((role === 'listitem' || role === 'option' || role === 'treeitem') && el.closest && el.closest('nav, aside, [role="navigation"]')) {
                 return cleanText(el.textContent).length > 1;
               }
               return false;
-            }, 80);
+            }, 120);
 
             const result = [];
             const seen = new Set();
@@ -348,31 +381,30 @@ object AntigravityBridgeScript {
           }
 
           function extractMessages() {
-            // Strategy 1: explicit author-role / message testid containers
-            let turns = collectDeep(document.body, el => {
+            const root = getAppRoot();
+            let turns = collectDeep(root, el => {
               const roleAttr = (el.getAttribute('data-message-author-role') || el.getAttribute('data-role') || el.getAttribute('data-author') || '').toLowerCase();
               if (roleAttr === 'user' || roleAttr === 'assistant' || roleAttr === 'model' || roleAttr === 'agent') return true;
               const testId = (el.getAttribute('data-testid') || '').toLowerCase();
-              if (testId.includes('message') || testId.includes('turn')) return true;
+              if (testId.includes('message') || testId.includes('turn') || testId.includes('step') || testId.includes('response')) {
+                return isVisible(el) && cleanText(el.textContent).length > 0;
+              }
               return false;
-            }, 150);
+            }, 300);
 
-            // Strategy 2: fallback semantic turn containers inside <main> / [role="main"] / [role="log"]
             if (turns.length === 0) {
-              const mainRoot = document.querySelector('[role="log"], main, [role="main"]') || document.body;
-              turns = collectDeep(mainRoot, el => {
+              turns = collectDeep(root, el => {
                 const tag = (el.tagName || '').toLowerCase();
                 const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
                 if (tag === 'article') return isVisible(el);
-                if ((cls.includes('message') || cls.includes('chat-turn') || cls.includes('response-container') || cls.includes('user-query')) &&
+                if ((cls.includes('message') || cls.includes('chat-turn') || cls.includes('response-container') || cls.includes('user-query') || cls.includes('prose') || cls.includes('markdown')) &&
                     isVisible(el) && cleanText(el.textContent).length > 0) {
                   return true;
                 }
                 return false;
-              }, 150);
+              }, 300);
             }
 
-            // Filter out nested containers so each turn is emitted once
             const topTurns = turns.filter((el, idx) => {
               for (let j = 0; j < turns.length; j++) {
                 if (idx !== j && turns[j].contains && turns[j].contains(el)) return false;
@@ -415,14 +447,16 @@ object AntigravityBridgeScript {
           }
 
           function extractQuota() {
-            const meters = collectDeep(document.body, el => {
+            const root = getAppRoot();
+            const meters = collectDeep(root, el => {
               const role = el.getAttribute('role') || '';
               const aria = (el.getAttribute('aria-label') || '').toLowerCase();
               const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
+              const tid = (el.getAttribute('data-testid') || '').toLowerCase();
               return role === 'progressbar' || (el.tagName || '').toLowerCase() === 'meter' ||
                 aria.includes('quota') || aria.includes('usage') || aria.includes('limit') ||
-                cls.includes('quota') || cls.includes('usage');
-            }, 25);
+                cls.includes('quota') || cls.includes('usage') || tid.includes('quota') || tid.includes('usage');
+            }, 30);
 
             for (const el of meters) {
               const now = parseFloat(el.getAttribute('aria-valuenow') || el.value || '');
@@ -452,14 +486,15 @@ object AntigravityBridgeScript {
           }
 
           function detectStreaming() {
-            const stopBtns = collectDeep(document.body, el => {
+            const root = getAppRoot();
+            const stopBtns = collectDeep(root, el => {
               const tag = (el.tagName || '').toLowerCase();
               const role = el.getAttribute('role') || '';
               if (tag !== 'button' && role !== 'button') return false;
               if (!isVisible(el)) return false;
               const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
               return label.includes('stop generating') || label === 'stop' || label.includes('cancel response');
-            }, 10);
+            }, 15);
             return stopBtns.length > 0;
           }
 
@@ -468,7 +503,7 @@ object AntigravityBridgeScript {
             if (host.includes('accounts.google.') || host.includes('signin.google.') || host.includes('consent.google.')) {
               return true;
             }
-            const signInButtons = collectDeep(document.body, el => {
+            const signInButtons = collectDeep(getAppRoot(), el => {
               const tag = (el.tagName || '').toLowerCase();
               if (tag !== 'button' && tag !== 'a') return false;
               if (!isVisible(el)) return false;
@@ -492,7 +527,8 @@ object AntigravityBridgeScript {
             const quota = authRequired ? { isLive: false } : extractQuota();
 
             let title = cleanText(document.title).replace(/\s*[-|•]\s*Antigravity.*$/i, '').trim();
-            const headerTitle = document.querySelector('header h1, header [role="heading"], [class*="conversation-title" i]');
+            const root = getAppRoot();
+            const headerTitle = root.querySelector('header h1, header [role="heading"], [class*="conversation-title" i], [data-testid*="title" i]');
             if (headerTitle && cleanText(headerTitle.textContent)) {
               title = cleanText(headerTitle.textContent);
             }
@@ -566,7 +602,7 @@ object AntigravityBridgeScript {
 
             setTimeout(() => {
               const form = input.closest && input.closest('form');
-              const scope = form || input.parentElement?.parentElement || document.body;
+              const scope = form || input.parentElement?.parentElement || getAppRoot();
               const sendBtns = collectDeep(scope, el => {
                 const t = (el.tagName || '').toLowerCase();
                 if (t !== 'button' && el.getAttribute('role') !== 'button') return false;
@@ -574,7 +610,7 @@ object AntigravityBridgeScript {
                 const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
                 if (el.type === 'submit' || label.includes('send') || label.includes('submit') || label.includes('ask')) return true;
                 return false;
-              }, 10);
+              }, 15);
 
               if (sendBtns.length > 0) {
                 sendBtns[sendBtns.length - 1].click();
@@ -583,18 +619,18 @@ object AntigravityBridgeScript {
                 input.dispatchEvent(enterEv);
               }
               scheduleSync();
-            }, 80);
+            }, 90);
             return true;
           }
 
           function stopGeneration() {
-            const stopBtns = collectDeep(document.body, el => {
+            const stopBtns = collectDeep(getAppRoot(), el => {
               const t = (el.tagName || '').toLowerCase();
               if (t !== 'button' && el.getAttribute('role') !== 'button') return false;
               if (!isVisible(el)) return false;
               const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
               return label.includes('stop') || label.includes('cancel');
-            }, 10);
+            }, 15);
             if (stopBtns.length > 0) {
               stopBtns[0].click();
               scheduleSync();
@@ -608,10 +644,7 @@ object AntigravityBridgeScript {
             if (!btn) return false;
             btn.click();
             setTimeout(() => {
-              const items = collectDeep(document.body, el => {
-                const role = el.getAttribute('role') || '';
-                return (role === 'menuitem' || role === 'option' || role === 'menuitemradio') && isVisible(el);
-              }, 40);
+              const items = getVisibleOverlayOptions();
               const parsed = [];
               const seen = new Set();
               items.forEach((item, idx) => {
@@ -629,10 +662,10 @@ object AntigravityBridgeScript {
                 });
               });
               if (parsed.length > 0) cachedModels = parsed;
-              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+              dismissOverlays();
               lastPayloadHash = '';
               syncNow();
-            }, 220);
+            }, 260);
             return true;
           }
 
@@ -641,32 +674,29 @@ object AntigravityBridgeScript {
             if (!btn) return false;
             btn.click();
             setTimeout(() => {
-              const items = collectDeep(document.body, el => {
-                const role = el.getAttribute('role') || '';
-                return (role === 'menuitem' || role === 'option' || role === 'menuitemradio') && isVisible(el);
-              }, 40);
+              const items = getVisibleOverlayOptions();
               const target = items.find(el => cleanText(el.textContent).toLowerCase().includes(modelName.toLowerCase()));
               if (target) {
                 target.click();
               } else {
-                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                dismissOverlays();
               }
               setTimeout(() => {
                 lastPayloadHash = '';
                 syncNow();
-              }, 200);
-            }, 220);
+              }, 240);
+            }, 260);
             return true;
           }
 
           function startNewChat() {
-            const newBtns = collectDeep(document.body, el => {
+            const newBtns = collectDeep(getAppRoot(), el => {
               const tag = (el.tagName || '').toLowerCase();
               const role = el.getAttribute('role') || '';
               if (tag !== 'button' && tag !== 'a' && role !== 'button') return false;
               const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
               return label.includes('new chat') || label.includes('new conversation') || label.includes('start new');
-            }, 10);
+            }, 15);
             if (newBtns.length > 0) {
               newBtns[0].click();
               setTimeout(() => { lastPayloadHash = ''; syncNow(); }, 300);
@@ -681,10 +711,10 @@ object AntigravityBridgeScript {
               window.location.href = url;
               return true;
             }
-            const candidates = collectDeep(document.body, el => {
+            const candidates = collectDeep(getAppRoot(), el => {
               const txt = cleanText(el.textContent);
               return txt && txt.toLowerCase().includes((title || '').toLowerCase());
-            }, 20);
+            }, 30);
             if (candidates.length > 0) {
               candidates[candidates.length - 1].click();
               setTimeout(() => { lastPayloadHash = ''; syncNow(); }, 300);
@@ -694,19 +724,19 @@ object AntigravityBridgeScript {
           }
 
           function triggerFileUpload() {
-            const fileInput = collectDeep(document.body, el =>
+            const fileInput = collectDeep(getAppRoot(), el =>
               (el.tagName || '').toLowerCase() === 'input' && el.type === 'file', 5
             )[0];
             if (fileInput) {
               fileInput.click();
               return true;
             }
-            const plusBtns = collectDeep(document.body, el => {
+            const plusBtns = collectDeep(getAppRoot(), el => {
               const tag = (el.tagName || '').toLowerCase();
               if (tag !== 'button' && el.getAttribute('role') !== 'button') return false;
               const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
               return label.includes('attach') || label.includes('upload') || label.includes('add file') || label === '+';
-            }, 10);
+            }, 15);
             if (plusBtns.length > 0) {
               plusBtns[0].click();
               return true;
@@ -718,48 +748,74 @@ object AntigravityBridgeScript {
             function redact(str) {
               return cleanText(str)
                 .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
-                .slice(0, 48);
+                .slice(0, 60);
             }
+
+            const appRoot = getAppRoot();
+            const allTestIds = Array.from(new Set(
+              collectDeep(appRoot, el => !!el.getAttribute('data-testid'), 500)
+                .map(el => el.getAttribute('data-testid'))
+            )).slice(0, 120);
+
+            const allAriaLabels = Array.from(new Set(
+              collectDeep(appRoot, el => !!el.getAttribute('aria-label') && isVisible(el), 300)
+                .map(el => (el.tagName || '').toLowerCase() + ':' + redact(el.getAttribute('aria-label')))
+            )).slice(0, 80);
+
             function walk(el, depth) {
-              if (!el || el.nodeType !== 1 || depth > 11) return null;
+              if (!el || el.nodeType !== 1 || depth > 14) return null;
               const tag = (el.tagName || '').toLowerCase();
               if (tag === 'script' || tag === 'style' || tag === 'svg' || tag === 'path') return null;
-              const node = { t: tag };
-              if (el.id) node.id = el.id.slice(0, 32);
-              const role = el.getAttribute('role');
-              if (role) node.r = role;
-              const aria = el.getAttribute('aria-label');
-              if (aria) node.a = redact(aria);
-              const testId = el.getAttribute('data-testid');
-              if (testId) node.tid = testId;
-              const expanded = el.getAttribute('aria-expanded');
-              if (expanded !== null) node.exp = expanded;
-              if (typeof el.className === 'string' && el.className.trim()) {
-                node.c = el.className.trim().split(/\s+/).slice(0, 4).join(' ');
-              }
-              const ownText = Array.from(el.childNodes)
-                .filter(c => c.nodeType === 3)
-                .map(c => c.nodeValue)
-                .join(' ');
-              const cleanOwn = redact(ownText);
-              if (cleanOwn) node.tx = cleanOwn;
 
-              const kids = [];
+              const tid = el.getAttribute('data-testid');
+              const role = el.getAttribute('role');
+              const aria = el.getAttribute('aria-label');
+              const expanded = el.getAttribute('aria-expanded');
+              const ownText = redact(
+                Array.from(el.childNodes).filter(c => c.nodeType === 3).map(c => c.nodeValue).join(' ')
+              );
+
               const childSource = el.shadowRoot ? el.shadowRoot.children : el.children;
-              if (el.shadowRoot) node.shadow = true;
+              const kids = [];
               if (childSource) {
-                for (let i = 0; i < Math.min(childSource.length, 24); i++) {
+                for (let i = 0; i < Math.min(childSource.length, 32); i++) {
                   const childNode = walk(childSource[i], depth + 1);
                   if (childNode) kids.push(childNode);
                 }
               }
+
+              // Flatten pure single-child wrapper <div>s without semantic attributes
+              if (tag === 'div' && !tid && !role && !aria && !el.id && !ownText && expanded === null && kids.length === 1) {
+                return kids[0];
+              }
+
+              const node = { t: tag };
+              if (el.id) node.id = el.id.slice(0, 32);
+              if (tid) node.tid = tid;
+              if (role) node.r = role;
+              if (aria) node.a = redact(aria);
+              if (expanded !== null) node.exp = expanded;
+              if (el.isContentEditable) node.ce = true;
+              if (typeof el.className === 'string' && el.className.trim()) {
+                node.c = el.className.trim().split(/\s+/).slice(0, 3).join(' ');
+              }
+              if (ownText) node.tx = ownText;
               if (kids.length) node.ch = kids;
               return node;
             }
+
+            const sheets = Array.from(document.querySelectorAll('[data-testid="bottom-sheet"], [role="dialog"]'))
+              .filter(isVisible)
+              .slice(0, 3)
+              .map(s => walk(s, 0));
+
             return JSON.stringify({
               url: window.location.href,
-              title: document.title,
-              tree: walk(document.body, 0)
+              rootTag: (appRoot && appRoot.getAttribute && appRoot.getAttribute('data-testid')) || (appRoot && appRoot.tagName) || 'body',
+              testIds: allTestIds,
+              ariaLabels: allAriaLabels,
+              mobileTree: walk(appRoot, 0),
+              openDialogs: sheets
             });
           }
 
