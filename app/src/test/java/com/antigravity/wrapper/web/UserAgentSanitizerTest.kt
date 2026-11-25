@@ -43,4 +43,20 @@ class UserAgentSanitizerTest {
 
         assertEquals(chromeUa, UserAgentSanitizer.sanitize(chromeUa))
     }
+
+    @Test
+    fun returnsDesktopUaWhenDesktopModeEnabled() {
+        val mobileUa =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8; wv) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Version/4.0 Chrome/131.0.0.0 Mobile Safari/537.36"
+
+        val desktop = UserAgentSanitizer.forViewportMode(mobileUa, desktopMode = true)
+        val mobile = UserAgentSanitizer.forViewportMode(mobileUa, desktopMode = false)
+
+        assertFalse(desktop.contains("Mobile"))
+        assertFalse(desktop.contains("; wv"))
+        assertTrue(desktop.contains("Chrome/"))
+        assertTrue(mobile.contains("Mobile"))
+        assertFalse(mobile.contains("; wv"))
+    }
 }

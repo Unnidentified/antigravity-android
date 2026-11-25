@@ -15,10 +15,12 @@ import com.antigravity.wrapper.R
 
 /**
  * Wires WebView download requests into Android's [DownloadManager], forwarding session cookies
- * and the sanitized User-Agent so authenticated downloads from Antigravity succeed.
+ * and the sanitized User-Agent so authenticated downloads from Antigravity succeed, and reports
+ * started downloads to the native Downloads screen.
  */
 class DownloadHandler(
     private val context: Context,
+    private val onDownloadRecorded: (id: Long, fileName: String, url: String, mimeType: String) -> Unit,
     private val onMessage: (String) -> Unit
 ) : DownloadListener {
 
@@ -95,7 +97,13 @@ class DownloadHandler(
                 return
             }
 
-            downloadManager.enqueue(request)
+            val downloadId = downloadManager.enqueue(request)
+            onDownloadRecorded(
+                downloadId,
+                safeFileName,
+                url,
+                mimetype.orEmpty()
+            )
             onMessage(context.getString(R.string.download_started, safeFileName))
         } catch (_: Exception) {
             onMessage(context.getString(R.string.download_failed))

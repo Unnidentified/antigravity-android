@@ -1,8 +1,10 @@
 package com.antigravity.wrapper
 
 import android.Manifest
-import android.annotation.SuppressLint
+import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -12,45 +14,50 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
-import android.webkit.CookieManager
+import android.view.WindowManager
 import android.webkit.MimeTypeMap
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
-import android.webkit.WebSettings
-import android.webkit.WebView
+import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.viewModels
 import androidx.browser.customtabs.CustomTabColorSchemeParams
 import androidx.browser.customtabs.CustomTabsIntent
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.isVisible
-import androidx.core.view.updatePadding
-import com.antigravity.wrapper.databinding.ActivityMainBinding
+import androidx.lifecycle.lifecycleScope
+import com.antigravity.wrapper.data.AppDestination
+import com.antigravity.wrapper.data.ThemeMode
+import com.antigravity.wrapper.ui.AntigravityApp
+import com.antigravity.wrapper.ui.state.MainViewModel
 import com.antigravity.wrapper.web.AntigravityWebChromeClient
 import com.antigravity.wrapper.web.AntigravityWebViewClient
 import com.antigravity.wrapper.web.DownloadHandler
 import com.antigravity.wrapper.web.UrlRouter
-import com.antigravity.wrapper.web.UserAgentSanitizer
-import com.google.android.material.snackbar.Snackbar
+import com.antigravity.wrapper.web.WebViewController
+import kotlinx.coroutines.launch
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : ComponentActivity() {
 
-    private lateinit var binding: ActivityMainBinding
+    private val viewModel: MainViewModel by viewModels()
+    private val webViewController = WebViewController()
+    private val snackbarHostState = SnackbarHostState()
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var pendingWebPermissionRequest: PermissionRequest? = null
-    private var lastFailedUrl: String? = null
-    private var isInitialLoadComplete = false
+    private var isSplashReleased = false
 
-    private var customFullscreenView: View? = null
-    private var customFullscreenCallback: WebChromeClient.CustomViewCallback? = null
+    private var fullscreenWebView by mutableStateOf<View?>(null)
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
 
     private val openDocumentsLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -75,35 +82,40 @@ class MainActivity : AppCompatActivity() {
         val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
 
-        // Keep the splash screen briefly until initial WebView navigation settles
-        splashScreen.setKeepOnScreenCondition { !isInitialLoadComplete }
+        splashScreen.setKeepOnScreenCondition { !isSplashReleased }
+        window.decorView.postDelayed({ isSplashReleased = true }, SPLASH_MAX_HOLD_MS)
 
-        enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
-        )
-
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-
-        setupWindowInsets()
-        setupSwipeRefresh()
-        setupErrorView()
-        setupWebView()
+        configureSystemBars(isDark = true)
         setupBackNavigation()
 
-        // Release splash screen if the network is slow so the user sees the progress indicator
-        binding.rootContainer.postDelayed({
-            isInitialLoadComplete = true
-        }, SPLASH_MAX_HOLD_MS)
+        val initialUrl = extractAllowedDeepLink(intent) ?: UrlRouter.START_URL
 
-        if (savedInstanceState != null) {
-            val restored = binding.webView.restoreState(savedInstanceState)
-            if (restored == null) {
-                loadInitialUrl(intent)
-            }
-        } else {
-            loadInitialUrl(intent)
+        setContent {
+            AntigravityApp(
+                viewModel = viewModel,
+                webViewController = webViewController,
+                snackbarHostState = snackbarHostState,
+                initialUrl = initialUrl,
+                fullscreenWebView = fullscreenWebView,
+                onConfigureSystemBars = { isDark -> configureSystemBars(isDark) },
+                onKeepScreenAwakeChanged = { keepAwake -> updateKeepScreenAwake(keepAwake) },
+                onBuildWebViewClient = { buildWebViewClient() },
+                onBuildWebChromeClient = { buildWebChromeClient() },
+                onBuildDownloadHandler = { buildDownloadHandler() },
+                onShareUrl = { title, url -> shareCurrentPage(title, url) },
+                onCopyToClipboard = { label, text -> copyToClipboard(label, text) },
+                onOpenExternalUrl = { url -> openInCustomTabsOrBrowser(url) },
+                onOpenSystemDownloads = { openSystemDownloads() },
+                onWebViewCreated = {
+                    val settings = viewModel.settings.value
+                    val darkEffective = isDarkForMode(settings.themeMode)
+                    webViewController.applySettings(
+                        settings = settings,
+                        isDarkEffective = darkEffective,
+                        reloadIfViewportChanged = false
+                    )
+                }
+            )
         }
     }
 
@@ -112,129 +124,87 @@ class MainActivity : AppCompatActivity() {
         setIntent(intent)
         val deepLink = extractAllowedDeepLink(intent)
         if (deepLink != null) {
-            hideErrorView()
-            binding.webView.loadUrl(deepLink)
+            viewModel.clearError()
+            viewModel.selectDestination(AppDestination.WORKSPACE)
+            webViewController.loadUrl(deepLink)
         }
     }
 
-    private fun setupWindowInsets() {
-        ViewCompat.setOnApplyWindowInsetsListener(binding.rootContainer) { view, windowInsets ->
-            val insets = windowInsets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or
-                    WindowInsetsCompat.Type.displayCutout() or
-                    WindowInsetsCompat.Type.ime()
-            )
-            view.updatePadding(
-                left = insets.left,
-                top = insets.top,
-                right = insets.right,
-                bottom = insets.bottom
-            )
-            windowInsets
+    private fun configureSystemBars(isDark: Boolean) {
+        val style = if (isDark) {
+            SystemBarStyle.dark(Color.TRANSPARENT)
+        } else {
+            SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+        }
+        enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+    }
+
+    private fun updateKeepScreenAwake(keepAwake: Boolean) {
+        if (keepAwake) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 
-    private fun setupSwipeRefresh() {
-        binding.swipeRefreshLayout.apply {
-            setProgressBackgroundColorSchemeColor(
-                ContextCompat.getColor(this@MainActivity, R.color.antigravity_surface)
-            )
-            setColorSchemeColors(
-                ContextCompat.getColor(this@MainActivity, R.color.antigravity_primary)
-            )
-            // Trigger pull-to-refresh only when the WebView is scrolled to the very top
-            setOnChildScrollUpCallback { _, _ ->
-                binding.webView.scrollY > 0
-            }
-            setOnRefreshListener {
-                reloadCurrentOrStartPage()
+    private fun isDarkForMode(mode: ThemeMode): Boolean {
+        return when (mode) {
+            ThemeMode.DARK, ThemeMode.AMOLED -> true
+            ThemeMode.LIGHT -> false
+            ThemeMode.SYSTEM -> {
+                val nightMask = resources.configuration.uiMode and
+                    android.content.res.Configuration.UI_MODE_NIGHT_MASK
+                nightMask == android.content.res.Configuration.UI_MODE_NIGHT_YES
             }
         }
     }
 
-    private fun setupErrorView() {
-        binding.retryButton.setOnClickListener {
-            hideErrorView()
-            reloadCurrentOrStartPage()
-        }
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebView() {
-        if (BuildConfig.DEBUG) {
-            WebView.setWebContentsDebuggingEnabled(true)
-        }
-
-        val webView = binding.webView
-        webView.setBackgroundColor(ContextCompat.getColor(this, R.color.antigravity_background))
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-
-        val defaultUserAgent = try {
-            WebSettings.getDefaultUserAgent(this)
-        } catch (_: Exception) {
-            webView.settings.userAgentString
-        }
-        val chromeLikeUserAgent = UserAgentSanitizer.sanitize(defaultUserAgent)
-
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            @Suppress("DEPRECATION")
-            databaseEnabled = true
-            userAgentString = chromeLikeUserAgent
-
-            javaScriptCanOpenWindowsAutomatically = true
-            setSupportMultipleWindows(true)
-            mediaPlaybackRequiresUserGesture = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            allowContentAccess = true
-            allowFileAccess = false
-            useWideViewPort = true
-            loadWithOverviewMode = true
-            builtInZoomControls = false
-            displayZoomControls = false
-            setSupportZoom(true)
-            cacheMode = WebSettings.LOAD_DEFAULT
-        }
-
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(webView, true)
-
-        webView.webViewClient = AntigravityWebViewClient(
-            onPageStartedCallback = { _ ->
-                binding.loadingProgressBar.isVisible = true
-                if (binding.loadingProgressBar.progress < 10) {
-                    binding.loadingProgressBar.setProgressCompat(10, false)
+    private fun buildWebViewClient(): AntigravityWebViewClient {
+        return AntigravityWebViewClient(
+            onPageStartedCallback = { url ->
+                viewModel.onPageStarted(url)
+            },
+            onPageFinishedCallback = { url, hadMainFrameError ->
+                isSplashReleased = true
+                webViewController.setRefreshing(false)
+                viewModel.onPageFinished(url, hadMainFrameError)
+                if (!hadMainFrameError) {
+                    val settings = viewModel.settings.value
+                    webViewController.injectMobilePolish(
+                        settings = settings,
+                        isDarkEffective = isDarkForMode(settings.themeMode)
+                    )
                 }
             },
-            onPageFinishedCallback = { _, hadMainFrameError ->
-                isInitialLoadComplete = true
-                binding.swipeRefreshLayout.isRefreshing = false
-                binding.loadingProgressBar.isVisible = false
-                if (!hadMainFrameError) {
-                    lastFailedUrl = null
-                    hideErrorView()
-                }
+            onNavigationStateChanged = { url, canGoBack, canGoForward ->
+                viewModel.onNavigationStateChanged(url, canGoBack, canGoForward)
             },
             onMainFrameErrorCallback = { failedUrl, errorCode, description ->
-                isInitialLoadComplete = true
-                lastFailedUrl = failedUrl ?: webView.url ?: UrlRouter.START_URL
-                binding.swipeRefreshLayout.isRefreshing = false
-                binding.loadingProgressBar.isVisible = false
-                showErrorView(errorCode, description)
+                isSplashReleased = true
+                webViewController.setRefreshing(false)
+                viewModel.onMainFrameError(
+                    failedUrl = failedUrl,
+                    errorCode = errorCode,
+                    description = description,
+                    isOffline = !isNetworkAvailable()
+                )
             },
-            onOpenExternalUrl = { url ->
-                openInCustomTabsOrBrowser(url)
-            },
-            onHandleSystemIntent = { url ->
-                openSystemIntent(url)
-            }
+            onOpenExternalUrl = { url -> openInCustomTabsOrBrowser(url) },
+            onHandleSystemIntent = { url -> openSystemIntent(url) }
         )
+    }
 
-        webView.webChromeClient = AntigravityWebChromeClient(
+    private fun buildWebChromeClient(): AntigravityWebChromeClient {
+        return AntigravityWebChromeClient(
             onProgressUpdate = { progress ->
-                updateLoadingProgress(progress)
+                viewModel.onProgressChanged(progress)
+                if (progress >= 100) {
+                    isSplashReleased = true
+                    webViewController.setRefreshing(false)
+                }
+            },
+            onTitleChanged = { title ->
+                viewModel.onTitleChanged(title)
             },
             onFileChooserRequested = { callback, params ->
                 handleShowFileChooser(callback, params)
@@ -257,9 +227,15 @@ class MainActivity : AppCompatActivity() {
                 exitFullscreenView()
             }
         )
+    }
 
-        webView.setDownloadListener(
-            DownloadHandler(this) { message ->
+    private fun buildDownloadHandler(): DownloadHandler {
+        return DownloadHandler(
+            context = this,
+            onDownloadRecorded = { id, fileName, url, mimeType ->
+                viewModel.recordDownload(id, fileName, url, mimeType)
+            },
+            onMessage = { message ->
                 showSnackbar(message)
             }
         )
@@ -270,26 +246,30 @@ class MainActivity : AppCompatActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (customFullscreenView != null) {
-                        exitFullscreenView()
-                        return
-                    }
-
-                    if (binding.webView.canGoBack()) {
-                        hideErrorView()
-                        binding.webView.goBack()
-                    } else {
-                        isEnabled = false
-                        onBackPressedDispatcher.onBackPressed()
+                    val state = viewModel.uiState.value
+                    when {
+                        fullscreenWebView != null -> exitFullscreenView()
+                        state.isQuickActionsOpen -> viewModel.setQuickActionsOpen(false)
+                        state.isFindBarOpen -> {
+                            viewModel.setFindBarOpen(false)
+                            webViewController.clearFind()
+                        }
+                        state.activeDestination != AppDestination.WORKSPACE -> {
+                            viewModel.selectDestination(AppDestination.WORKSPACE)
+                        }
+                        state.isImmersiveMode -> viewModel.setImmersiveMode(false)
+                        webViewController.canGoBack() -> {
+                            viewModel.clearError()
+                            webViewController.goBack()
+                        }
+                        else -> {
+                            isEnabled = false
+                            onBackPressedDispatcher.onBackPressed()
+                        }
                     }
                 }
             }
         )
-    }
-
-    private fun loadInitialUrl(launchIntent: Intent?) {
-        val targetUrl = extractAllowedDeepLink(launchIntent) ?: UrlRouter.START_URL
-        binding.webView.loadUrl(targetUrl)
     }
 
     private fun extractAllowedDeepLink(launchIntent: Intent?): String? {
@@ -302,40 +282,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun reloadCurrentOrStartPage() {
-        val urlToLoad = lastFailedUrl
-            ?: binding.webView.url?.takeIf { !it.startsWith("chrome-error://") && it != "about:blank" }
-            ?: UrlRouter.START_URL
-
-        if (lastFailedUrl != null || binding.webView.url.isNullOrBlank() ||
-            binding.webView.url?.startsWith("chrome-error://") == true
-        ) {
-            binding.webView.loadUrl(urlToLoad)
-        } else {
-            binding.webView.reload()
-        }
-    }
-
-    private fun updateLoadingProgress(progress: Int) {
-        if (progress >= 100) {
-            binding.loadingProgressBar.setProgressCompat(100, true)
-            binding.loadingProgressBar.postDelayed({
-                if (!isFinishing && !isDestroyed) {
-                    binding.loadingProgressBar.isVisible = false
-                }
-            }, 150L)
-            binding.swipeRefreshLayout.isRefreshing = false
-        } else {
-            binding.loadingProgressBar.isVisible = true
-            binding.loadingProgressBar.setProgressCompat(progress.coerceAtLeast(8), true)
-        }
-    }
-
     private fun handleShowFileChooser(
         callback: ValueCallback<Array<Uri>>,
         params: WebChromeClient.FileChooserParams?
     ): Boolean {
-        // Cancel any previously pending callback so the WebView never stalls
         filePathCallback?.onReceiveValue(null)
         filePathCallback = callback
 
@@ -438,10 +388,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID,
                 PermissionRequest.RESOURCE_MIDI_SYSEX -> true
-                else -> {
-                    // Allow trusted-origin browser permissions such as clipboard read/write
-                    resource.contains("CLIPBOARD", ignoreCase = true)
-                }
+                else -> resource.contains("CLIPBOARD", ignoreCase = true)
             }
         }
 
@@ -455,25 +402,63 @@ class MainActivity : AppCompatActivity() {
     private fun handlePopupUrl(url: String) {
         when (UrlRouter.route(url)) {
             UrlRouter.Route.IN_APP -> {
-                hideErrorView()
-                binding.webView.loadUrl(url)
+                viewModel.clearError()
+                viewModel.selectDestination(AppDestination.WORKSPACE)
+                webViewController.loadUrl(url)
             }
             UrlRouter.Route.EXTERNAL_BROWSER -> openInCustomTabsOrBrowser(url)
             UrlRouter.Route.SYSTEM_INTENT -> openSystemIntent(url)
         }
     }
 
+    private fun shareCurrentPage(title: String, url: String) {
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, title)
+            putExtra(Intent.EXTRA_TEXT, url)
+        }
+        try {
+            startActivity(Intent.createChooser(shareIntent, getString(R.string.share_chooser_title)))
+        } catch (_: ActivityNotFoundException) {
+            showSnackbar(getString(R.string.external_link_error))
+        }
+    }
+
+    private fun copyToClipboard(label: String, text: String) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+    }
+
+    private fun openSystemDownloads() {
+        try {
+            startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
+        } catch (_: ActivityNotFoundException) {
+            showSnackbar(getString(R.string.downloads_app_error))
+        }
+    }
+
     private fun openInCustomTabsOrBrowser(url: String) {
         val uri = Uri.parse(url)
+        val isDark = isDarkForMode(viewModel.settings.value.themeMode)
         try {
-            val darkColors = CustomTabColorSchemeParams.Builder()
-                .setToolbarColor(ContextCompat.getColor(this, R.color.antigravity_surface))
-                .setNavigationBarColor(ContextCompat.getColor(this, R.color.antigravity_background))
+            val toolbarColor = ContextCompat.getColor(
+                this,
+                if (isDark) R.color.antigravity_surface else R.color.antigravity_light_surface
+            )
+            val navColor = ContextCompat.getColor(
+                this,
+                if (isDark) R.color.antigravity_background else R.color.antigravity_light_background
+            )
+            val colors = CustomTabColorSchemeParams.Builder()
+                .setToolbarColor(toolbarColor)
+                .setNavigationBarColor(navColor)
                 .build()
 
             val customTabsIntent = CustomTabsIntent.Builder()
-                .setColorScheme(CustomTabsIntent.COLOR_SCHEME_DARK)
-                .setDefaultColorSchemeParams(darkColors)
+                .setColorScheme(
+                    if (isDark) CustomTabsIntent.COLOR_SCHEME_DARK else CustomTabsIntent.COLOR_SCHEME_LIGHT
+                )
+                .setDefaultColorSchemeParams(colors)
                 .setShowTitle(true)
                 .build()
 
@@ -510,29 +495,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showErrorView(errorCode: Int, description: String?) {
-        val offline = !isNetworkAvailable()
-        binding.errorTitle.setText(
-            if (offline) R.string.error_offline_title else R.string.error_load_title
-        )
-        binding.errorDescription.setText(
-            if (offline) R.string.error_offline_description else R.string.error_load_description
-        )
-        if (!offline && !description.isNullOrBlank()) {
-            binding.errorDetail.text = getString(R.string.error_details_format, description, errorCode)
-            binding.errorDetail.isVisible = true
-        } else {
-            binding.errorDetail.isVisible = false
-        }
-        binding.errorContainer.isVisible = true
-        binding.swipeRefreshLayout.isVisible = false
-    }
-
-    private fun hideErrorView() {
-        binding.errorContainer.isVisible = false
-        binding.swipeRefreshLayout.isVisible = true
-    }
-
     private fun isNetworkAvailable(): Boolean {
         val connectivityManager =
             getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
@@ -543,49 +505,42 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun enterFullscreenView(view: View, callback: WebChromeClient.CustomViewCallback) {
-        if (customFullscreenView != null) {
+        if (fullscreenWebView != null) {
             callback.onCustomViewHidden()
             return
         }
-        customFullscreenView = view
-        customFullscreenCallback = callback
-        binding.fullscreenContainer.addView(view)
-        binding.fullscreenContainer.isVisible = true
-        binding.swipeRefreshLayout.isVisible = false
+        fullscreenWebView = view
+        fullscreenCallback = callback
+        viewModel.setFullscreenWebView(true)
     }
 
     private fun exitFullscreenView() {
-        val view = customFullscreenView ?: return
-        binding.fullscreenContainer.removeView(view)
-        binding.fullscreenContainer.isVisible = false
-        binding.swipeRefreshLayout.isVisible = !binding.errorContainer.isVisible
-        customFullscreenCallback?.onCustomViewHidden()
-        customFullscreenView = null
-        customFullscreenCallback = null
+        if (fullscreenWebView == null) return
+        fullscreenWebView = null
+        fullscreenCallback?.onCustomViewHidden()
+        fullscreenCallback = null
+        viewModel.setFullscreenWebView(false)
     }
 
     private fun showSnackbar(message: String) {
-        Snackbar.make(binding.rootContainer, message, Snackbar.LENGTH_SHORT).show()
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        binding.webView.saveState(outState)
+        lifecycleScope.launch {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(message)
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        binding.webView.onResume()
+        webViewController.onResume()
     }
 
     override fun onPause() {
-        binding.webView.onPause()
-        CookieManager.getInstance().flush()
+        webViewController.onPause()
         super.onPause()
     }
 
     override fun onStop() {
-        CookieManager.getInstance().flush()
+        webViewController.flushCookies()
         super.onStop()
     }
 
@@ -595,18 +550,11 @@ class MainActivity : AppCompatActivity() {
         pendingWebPermissionRequest?.deny()
         pendingWebPermissionRequest = null
         exitFullscreenView()
-
-        binding.webView.apply {
-            stopLoading()
-            setDownloadListener(null)
-            webChromeClient = null
-            webViewClient = android.webkit.WebViewClient()
-            destroy()
-        }
+        webViewController.destroy()
         super.onDestroy()
     }
 
     companion object {
-        private const val SPLASH_MAX_HOLD_MS = 1200L
+        private const val SPLASH_MAX_HOLD_MS = 900L
     }
 }

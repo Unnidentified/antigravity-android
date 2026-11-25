@@ -1,0 +1,94 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional release tag to publish (e.g. v1.0.0-alpha.2)'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark release as prerelease'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run unit tests and assemble debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest assembleDebug
+
+      - name: Prepare APK artifact
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/antigravity-debug.apk
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: antigravity-debug-apk
+          path: dist/antigravity-debug.apk
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            IS_PRERELEASE=$([[ "$TAG" == *-* ]] && echo "true" || echo "false")
+          else
+            TAG="${{ inputs.tag }}"
+            IS_PRERELEASE="${{ inputs.prerelease }}"
+          fi
+
+          PRERELEASE_FLAG=""
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          NOTES="Native Jetpack Compose & Material 3 build of Antigravity for Android (${TAG}).
+
+          ### Highlights
+          - Material 3 native navigation (Workspace, Saved, Downloads, Settings) with Material You dynamic colors, Dark, AMOLED Black, and Light themes
+          - Branded navigation drawer with pinned bookmarks & quick tools
+          - Quick Actions & reusable Quick Prompts bottom sheet with direct input insertion
+          - Integrated Find in Page, live text zoom slider, mobile UI polish, desktop viewport toggle, focus mode, haptics, and native Downloads manager
+          - Full Google OAuth compatibility, file uploads, authenticated downloads, and Chrome Custom Tabs for external links
+
+          Built and verified automatically via GitHub Actions (\`./gradlew testDebugUnitTest assembleDebug\`)."
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/antigravity-debug.apk --clobber
+          else
+            gh release create "$TAG" dist/antigravity-debug.apk \
+              --target main \
+              $PRERELEASE_FLAG \
+              --title "Antigravity ${TAG}" \
+              --notes "$NOTES"
+          fi

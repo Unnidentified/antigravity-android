@@ -10,11 +10,12 @@ import android.webkit.WebViewClient
 /**
  * Custom [WebViewClient] for Antigravity that keeps Antigravity and Google Auth domains
  * inside the WebView, routes external links to Chrome Custom Tabs, persists cookies to disk,
- * and intercepts main-frame network errors so a native error UI can be shown.
+ * tracks SPA history changes, and intercepts main-frame network errors for native error UI.
  */
 class AntigravityWebViewClient(
     private val onPageStartedCallback: (url: String?) -> Unit,
     private val onPageFinishedCallback: (url: String?, hadMainFrameError: Boolean) -> Unit,
+    private val onNavigationStateChanged: (url: String?, canGoBack: Boolean, canGoForward: Boolean) -> Unit,
     private val onMainFrameErrorCallback: (failedUrl: String?, errorCode: Int, description: String?) -> Unit,
     private val onOpenExternalUrl: (url: String) -> Unit,
     private val onHandleSystemIntent: (url: String) -> Unit
@@ -45,13 +46,34 @@ class AntigravityWebViewClient(
         if (url != null && !url.startsWith("chrome-error://")) {
             hasMainFrameError = false
             onPageStartedCallback(url)
+            onNavigationStateChanged(
+                url,
+                view?.canGoBack() == true,
+                view?.canGoForward() == true
+            )
         }
     }
 
     override fun onPageFinished(view: WebView?, url: String?) {
         super.onPageFinished(view, url)
         CookieManager.getInstance().flush()
+        onNavigationStateChanged(
+            url,
+            view?.canGoBack() == true,
+            view?.canGoForward() == true
+        )
         onPageFinishedCallback(url, hasMainFrameError)
+    }
+
+    override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+        super.doUpdateVisitedHistory(view, url, isReload)
+        if (url != null && !url.startsWith("chrome-error://")) {
+            onNavigationStateChanged(
+                url,
+                view?.canGoBack() == true,
+                view?.canGoForward() == true
+            )
+        }
     }
 
     override fun onReceivedError(

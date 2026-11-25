@@ -11,6 +11,10 @@ object UserAgentSanitizer {
         "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
+    private const val DESKTOP_CHROME_UA =
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
     private val WV_SEMICOLON_REGEX = Regex(";\\s*wv(?=\\s*[;)])", RegexOption.IGNORE_CASE)
     private val WV_LEADING_REGEX = Regex("\\(\\s*wv\\s*;\\s*", RegexOption.IGNORE_CASE)
     private val VERSION_TOKEN_REGEX = Regex("\\bVersion/\\d+(?:\\.\\d+)*\\s*", RegexOption.IGNORE_CASE)
@@ -29,5 +33,13 @@ object UserAgentSanitizer {
             .trim()
 
         return cleaned.ifBlank { FALLBACK_CHROME_MOBILE_UA }
+    }
+
+    fun forViewportMode(defaultUserAgent: String?, desktopMode: Boolean): String {
+        return if (desktopMode) {
+            DESKTOP_CHROME_UA
+        } else {
+            sanitize(defaultUserAgent)
+        }
     }
 }
