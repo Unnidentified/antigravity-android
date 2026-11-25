@@ -28,22 +28,24 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.DataUsage
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.ScreenLockPortrait
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Vibration
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -89,11 +91,18 @@ import kotlin.math.roundToInt
 fun ModelSelectorSheet(
     models: List<ModelOption>,
     activeModelLabel: String,
-    onSelectModel: (ModelOption) -> Unit,
+    isRefreshing: Boolean,
+    onSelectModel: (modelName: String, effortTier: String) -> Unit,
     onRefreshModels: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val initialTier = remember(activeModelLabel) {
+        Regex("\\b(Low|Medium|High|Extra)\\b", RegexOption.IGNORE_CASE)
+            .find(activeModelLabel)?.groupValues?.get(1) ?: "High"
+    }
+    var selectedEffort by remember(initialTier) { mutableStateOf(initialTier) }
+    val effortChoices = listOf("Low", "Medium", "High", "Extra")
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -103,7 +112,6 @@ fun ModelSelectorSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
         ) {
@@ -121,30 +129,73 @@ fun ModelSelectorSheet(
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "Model Selector",
+                        text = "Model",
                         style = MaterialTheme.typography.titleLarge,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }
-                FilledTonalButton(onClick = onRefreshModels) {
-                    Icon(
-                        imageVector = Icons.Rounded.Refresh,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Sync", style = MaterialTheme.typography.labelMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FilledTonalButton(
+                        onClick = onRefreshModels,
+                        enabled = !isRefreshing
+                    ) {
+                        if (isRefreshing) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            if (isRefreshing) "Syncing" else "Sync",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Close")
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = "Active: $activeModelLabel",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (activeModelLabel.isNotBlank()) {
+                Text(
+                    text = "Active: $activeModelLabel",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Thinking effort selector row for effort-group models
+            Text(
+                text = "THINKING EFFORT",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                effortChoices.forEach { effort ->
+                    FilterChip(
+                        selected = selectedEffort.equals(effort, ignoreCase = true),
+                        onClick = { selectedEffort = effort },
+                        label = { Text(effort, style = MaterialTheme.typography.labelMedium) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
 
             if (models.isEmpty()) {
                 Surface(
@@ -157,13 +208,13 @@ fun ModelSelectorSheet(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "No model list synced yet",
+                            text = if (isRefreshing) "Loading models…" else "No models synced yet",
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Tap Sync above to pull available models directly from your Antigravity session.",
+                            text = "Tap Sync above to fetch available models from Antigravity.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
@@ -171,12 +222,26 @@ fun ModelSelectorSheet(
                     }
                 }
             } else {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     models.forEach { model ->
-                        val selected = model.isSelected || model.name.equals(activeModelLabel, ignoreCase = true)
+                        val selected = model.isSelected ||
+                            activeModelLabel.startsWith(model.name, ignoreCase = true)
+                        val tierToDisplay = model.tier.ifBlank {
+                            if (model.hasEffortLevels) selectedEffort else ""
+                        }
                         Surface(
                             onClick = {
-                                onSelectModel(model)
+                                val chosenTier = if (model.hasEffortLevels) {
+                                    selectedEffort
+                                } else {
+                                    model.tier
+                                }
+                                onSelectModel(model.name, chosenTier)
                                 onDismiss()
                             },
                             shape = RoundedCornerShape(18.dp),
@@ -189,7 +254,11 @@ fun ModelSelectorSheet(
                                 .fillMaxWidth()
                                 .border(
                                     width = if (selected) 1.2.dp else 0.dp,
-                                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceContainerHigh
+                                    },
                                     shape = RoundedCornerShape(18.dp)
                                 )
                         ) {
@@ -203,25 +272,26 @@ fun ModelSelectorSheet(
                                     Text(
                                         text = model.name,
                                         style = MaterialTheme.typography.titleSmall,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
-                                    if (model.description.isNotBlank()) {
+                                    if (tierToDisplay.isNotBlank()) {
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            text = model.description,
+                                            text = tierToDisplay,
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
                                 }
                                 if (selected) {
-                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Spacer(modifier = Modifier.width(10.dp))
                                     Icon(
                                         imageVector = Icons.Rounded.Check,
                                         contentDescription = "Selected",
-                                        tint = MaterialTheme.colorScheme.primary
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
                                     )
                                 }
                             }
@@ -239,12 +309,13 @@ fun UsageQuotaSheet(
     quota: QuotaInfo,
     activeModelLabel: String,
     messageCount: Int,
-    conversationCount: Int,
     bridgeStatus: BridgeStatus,
+    isRefreshing: Boolean,
+    statusMessage: String?,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
     val primaryColor = MaterialTheme.colorScheme.primary
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
 
@@ -266,7 +337,7 @@ fun UsageQuotaSheet(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Rounded.DataUsage,
+                        imageVector = Icons.Rounded.Speed,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(22.dp)
@@ -278,18 +349,47 @@ fun UsageQuotaSheet(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }
-                FilledTonalButton(onClick = onRefresh) {
-                    Icon(
-                        imageVector = Icons.Rounded.Refresh,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Refresh", style = MaterialTheme.typography.labelMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FilledTonalButton(
+                        onClick = onRefresh,
+                        enabled = !isRefreshing
+                    ) {
+                        if (isRefreshing) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            if (isRefreshing) "Syncing" else "Refresh",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Close")
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            // Inline refresh feedback directly inside the sheet (never hidden behind scrim!)
+            if (!statusMessage.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = statusMessage,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
 
             // Quota Gauge Card
             Surface(
@@ -304,11 +404,11 @@ fun UsageQuotaSheet(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
-                        modifier = Modifier.size(76.dp),
+                        modifier = Modifier.size(74.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         val pct = quota.usedPercent ?: 0f
-                        Canvas(modifier = Modifier.size(68.dp)) {
+                        Canvas(modifier = Modifier.size(66.dp)) {
                             drawArc(
                                 color = trackColor,
                                 startAngle = 0f,
@@ -346,7 +446,7 @@ fun UsageQuotaSheet(
                             text = when {
                                 quota.rawSummary.isNotBlank() -> quota.rawSummary
                                 quota.remainingLabel.isNotBlank() -> quota.remainingLabel
-                                else -> "Quota meter syncs automatically whenever Antigravity displays usage limits."
+                                else -> "Tap Refresh above to query live usage from Antigravity."
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -363,27 +463,49 @@ fun UsageQuotaSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Session Metrics Row
+            // Active Model full-width tile (never truncated mid-word)
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "ACTIVE MODEL",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = activeModelLabel.ifBlank { "Syncing…" },
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 MetricTile(
-                    label = "Model",
-                    value = activeModelLabel.take(18),
-                    modifier = Modifier.weight(1.3f)
-                )
-                MetricTile(
                     label = "Messages",
                     value = messageCount.toString(),
-                    modifier = Modifier.weight(0.85f)
+                    modifier = Modifier.weight(1f)
                 )
                 MetricTile(
                     label = "Status",
                     value = bridgeStatus.label,
-                    modifier = Modifier.weight(0.95f)
+                    modifier = Modifier.weight(1f)
                 )
             }
         }
@@ -462,10 +584,15 @@ fun QuickPromptsSheet(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }
-                TextButton(onClick = { showAddDialog = true }) {
-                    Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("New")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { showAddDialog = true }) {
+                        Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("New")
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Rounded.Close, contentDescription = "Close")
+                    }
                 }
             }
 
@@ -521,7 +648,7 @@ fun QuickPromptsSheet(
     if (showAddDialog) {
         var title by remember { mutableStateOf("") }
         var body by remember { mutableStateOf("") }
-        var category by remember { mutableStateOf("Custom") }
+        val category = "Custom"
         AlertDialog(
             onDismissRequest = { showAddDialog = false },
             title = { Text("New Quick Prompt") },
@@ -597,11 +724,20 @@ fun SettingsSheet(
                 .padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text(
-                text = "Settings & Diagnostics",
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Settings & Diagnostics",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Rounded.Close, contentDescription = "Close")
+                }
+            }
 
             // Appearance Card
             Surface(
@@ -739,12 +875,6 @@ fun SettingsSheet(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Copy Sanitized DOM Snapshot")
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Copies the page's structural DOM tree (emails redacted) so we can calibrate exact selectors if any element doesn't sync.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                     Spacer(modifier = Modifier.height(10.dp))
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     Spacer(modifier = Modifier.height(6.dp))
@@ -858,6 +988,7 @@ private fun SheetSwitchRow(
 fun EmptyChatWelcome(
     bridgeStatus: BridgeStatus,
     activeModelLabel: String,
+    isSwitchingConversation: Boolean,
     errorMessage: String?,
     onSuggestionClick: (String) -> Unit,
     onRetryConnect: () -> Unit,
@@ -874,6 +1005,20 @@ fun EmptyChatWelcome(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxWidth()
         ) {
+            if (isSwitchingConversation) {
+                CircularProgressIndicator(
+                    strokeWidth = 3.dp,
+                    modifier = Modifier.size(36.dp)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Loading conversation…",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                return@Column
+            }
+
             Box(
                 modifier = Modifier
                     .size(64.dp)
@@ -910,9 +1055,10 @@ fun EmptyChatWelcome(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = errorMessage ?: when (bridgeStatus) {
-                    BridgeStatus.CONNECTING -> "Syncing your session, conversations, and models in the background."
-                    else -> "Native Material 3 workspace • $activeModelLabel"
+                text = errorMessage ?: when {
+                    bridgeStatus == BridgeStatus.CONNECTING -> "Syncing your session, conversations, and models."
+                    activeModelLabel.isNotBlank() -> activeModelLabel
+                    else -> "Ready for your prompt"
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

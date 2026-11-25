@@ -22,10 +22,10 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.DataUsage
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -85,7 +85,7 @@ fun ChatDrawerSheet(
                 .fillMaxWidth()
                 .padding(horizontal = 14.dp, vertical = 12.dp)
         ) {
-            // Branded Header + New Chat CTA
+            // Branded Header
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -191,7 +191,7 @@ fun ChatDrawerSheet(
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
             )
 
-            // Conversations List
+            // Conversations List with properly separated title and right-aligned timestamp
             if (filtered.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -217,14 +217,6 @@ fun ChatDrawerSheet(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        if (searchQuery.isBlank()) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Tap refresh above or start a new chat.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                            )
-                        }
                     }
                 }
             } else {
@@ -238,12 +230,27 @@ fun ChatDrawerSheet(
                     items(filtered, key = { it.id }) { conversation ->
                         NavigationDrawerItem(
                             label = {
-                                Text(
-                                    text = conversation.title,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = conversation.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (conversation.updatedLabel.isNotBlank()) {
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = conversation.updatedLabel,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
                             },
                             selected = conversation.isActive,
                             onClick = { onSelectConversation(conversation) },
@@ -268,7 +275,7 @@ fun ChatDrawerSheet(
                 modifier = Modifier.padding(vertical = 10.dp)
             )
 
-            // Usage Quota Compact Card
+            // Usage & Quota Footer Card — displays full model name without mid-word truncation
             Surface(
                 onClick = onOpenQuota,
                 shape = RoundedCornerShape(18.dp),
@@ -283,7 +290,7 @@ fun ChatDrawerSheet(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = Icons.Rounded.DataUsage,
+                                imageVector = Icons.Rounded.Speed,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(18.dp)
@@ -295,9 +302,19 @@ fun ChatDrawerSheet(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
+                        if (quota.usedPercent != null) {
+                            Text(
+                                text = "${quota.usedPercent.toInt()}%",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    if (activeModelLabel.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = quota.usedPercent?.let { "${it.toInt()}%" } ?: activeModelLabel.take(16),
-                            style = MaterialTheme.typography.labelSmall,
+                            text = activeModelLabel,
+                            style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -313,9 +330,9 @@ fun ChatDrawerSheet(
                                 .clip(RoundedCornerShape(999.dp))
                         )
                     } else {
-                        Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = quota.remainingLabel.ifBlank { "Tap to inspect quota & session details" },
+                            text = quota.remainingLabel.ifBlank { "Tap to view quota & session usage" },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
