@@ -67,6 +67,7 @@ data class ChatMessage(
     val id: String,
     val role: MessageRole,
     val markdownContent: String,
+    val timestampLabel: String = "",
     val reasoningBlocks: List<ReasoningBlock> = emptyList(),
     val artifacts: List<ArtifactCard> = emptyList(),
     val isStreaming: Boolean = false,

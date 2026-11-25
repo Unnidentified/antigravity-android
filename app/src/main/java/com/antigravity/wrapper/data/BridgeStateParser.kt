@@ -123,6 +123,7 @@ object BridgeStateParser {
                 id = SimpleJson.asString(obj["id"])?.takeIf { it.isNotBlank() } ?: "msg-$index",
                 role = role,
                 markdownContent = markdown,
+                timestampLabel = SimpleJson.asString(obj["timestamp"]).orEmpty().trim(),
                 reasoningBlocks = reasoning,
                 artifacts = artifacts,
                 isStreaming = SimpleJson.asBoolean(obj["isStreaming"]) == true
@@ -143,12 +144,21 @@ object BridgeStateParser {
             QuotaInfo()
         }
 
+        val rawActiveModel = SimpleJson.asString(root["activeModel"]).orEmpty().trim()
+        val cleanActiveModel = if (rawActiveModel.equals("No Model Selected", ignoreCase = true) ||
+            rawActiveModel.equals("Select model", ignoreCase = true)
+        ) {
+            ""
+        } else {
+            rawActiveModel
+        }
+
         return BridgeSnapshot(
             currentUrl = SimpleJson.asString(root["url"]).orEmpty(),
             conversationTitle = normalizeConversationTitle(SimpleJson.asString(root["title"])),
             authRequired = SimpleJson.asBoolean(root["authRequired"]) == true,
             isStreaming = SimpleJson.asBoolean(root["isStreaming"]) == true,
-            activeModelName = SimpleJson.asString(root["activeModel"]).orEmpty().trim(),
+            activeModelName = cleanActiveModel,
             activeProject = SimpleJson.asString(root["activeProject"]).orEmpty().trim(),
             permissionsPreset = SimpleJson.asString(root["permissionsPreset"]).orEmpty().trim(),
             models = models,

@@ -5,6 +5,8 @@ import android.webkit.WebView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,9 +24,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.FilledTonalButton
@@ -32,6 +36,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -39,7 +44,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,7 +65,7 @@ import com.antigravity.wrapper.ui.components.EmptyChatWelcome
 import com.antigravity.wrapper.ui.components.ModelSelectorSheet
 import com.antigravity.wrapper.ui.components.PromptComposerBar
 import com.antigravity.wrapper.ui.components.QuickPromptsSheet
-import com.antigravity.wrapper.ui.components.SettingsSheet
+import com.antigravity.wrapper.ui.components.SettingsFullScreen
 import com.antigravity.wrapper.ui.components.UsageQuotaSheet
 import com.antigravity.wrapper.ui.state.ChatViewModel
 import com.antigravity.wrapper.ui.theme.AntigravityTheme
@@ -124,7 +131,7 @@ fun AntigravityNativeApp(
         viewModel.addOptimisticUserMessage(textToSend)
         bridgeEngine.sendPrompt(textToSend) { dispatched ->
             if (!dispatched) {
-                showToast("Session input not ready yet — check Diagnostics")
+                showToast("Session input not ready yet")
             }
         }
     }
@@ -136,6 +143,7 @@ fun AntigravityNativeApp(
         onConfigureSystemBars(isDarkEffective)
     }
 
+    // Only toggle WebView focus/touch when showWebOverlay actually flips (never during typing/scrolling!)
     LaunchedEffect(showWebOverlay) {
         bridgeEngine.setInteractive(showWebOverlay)
     }
@@ -145,9 +153,20 @@ fun AntigravityNativeApp(
     }
 
     val displayedMessages = uiState.displayedMessages
-    LaunchedEffect(displayedMessages.size, uiState.snapshot.isStreaming) {
+    val currentUrl = uiState.snapshot.currentUrl
+
+    // Jump straight to latest message when opening a conversation or receiving a new message
+    LaunchedEffect(currentUrl, displayedMessages.size) {
         if (displayedMessages.isNotEmpty()) {
-            listState.animateScrollToItem(displayedMessages.lastIndex)
+            listState.scrollToItem(displayedMessages.lastIndex)
+        }
+    }
+
+    val showScrollToBottom by remember {
+        derivedStateOf {
+            val total = listState.layoutInfo.totalItemsCount
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            total > 1 && lastVisible < total - 1
         }
     }
 
@@ -163,11 +182,10 @@ fun AntigravityNativeApp(
                 .background(MaterialTheme.colorScheme.background)
         ) {
             // LAYER 0: Headless WebView engine host.
-            // Focus-blocked and touch-blocked whenever hidden behind the native Compose UI.
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .zIndex(if (showWebOverlay) 2f else 0f)
+                    .zIndex(if (showWebOverlay) 3f else 0f)
             ) {
                 if (showHeadlessWebForAuth) {
                     Surface(
@@ -255,9 +273,6 @@ fun AntigravityNativeApp(
                                 initialUrl = initialUrl
                             )
                         }
-                    },
-                    update = {
-                        bridgeEngine.setInteractive(showWebOverlay)
                     }
                 )
             }
@@ -317,18 +332,12 @@ fun AntigravityNativeApp(
                             topBar = {
                                 ChatTopBar(
                                     conversationTitle = uiState.snapshot.conversationTitle,
-                                    activeModelLabel = uiState.activeModelLabel,
+                                    activeProject = uiState.snapshot.activeProject,
                                     bridgeStatus = uiState.bridgeStatus,
                                     quotaUsedPercent = uiState.snapshot.quota.usedPercent,
                                     onOpenDrawer = {
                                         triggerHaptic()
                                         scope.launch { drawerState.open() }
-                                    },
-                                    onOpenModelSelector = {
-                                        triggerHaptic()
-                                        viewModel.setModelSheetOpen(true)
-                                        viewModel.onStartModelRefresh()
-                                        bridgeEngine.refreshModels()
                                     },
                                     onOpenQuotaSheet = {
                                         triggerHaptic()
@@ -344,9 +353,9 @@ fun AntigravityNativeApp(
                             bottomBar = {
                                 PromptComposerBar(
                                     text = uiState.composerText,
-                                    activeModelLabel = uiState.activeModelLabel.ifBlank { "Model" },
+                                    activeModelLabel = uiState.activeModelLabel,
                                     isStreaming = uiState.snapshot.isStreaming,
-                                    enabled = uiState.bridgeStatus == BridgeStatus.CONNECTED,
+                                    isConnected = uiState.bridgeStatus == BridgeStatus.CONNECTED,
                                     onTextChange = { viewModel.updateComposerText(it) },
                                     onSend = { sendCurrentPrompt() },
                                     onStop = {
@@ -360,8 +369,11 @@ fun AntigravityNativeApp(
                                     onOpenModelSelector = {
                                         triggerHaptic()
                                         viewModel.setModelSheetOpen(true)
-                                        viewModel.onStartModelRefresh()
-                                        bridgeEngine.refreshModels()
+                                        // Only trigger a background refresh if models aren't cached yet
+                                        if (uiState.snapshot.models.size <= 1) {
+                                            viewModel.onStartModelRefresh()
+                                            bridgeEngine.refreshModels()
+                                        }
                                     },
                                     onOpenQuickPrompts = {
                                         triggerHaptic()
@@ -427,6 +439,35 @@ fun AntigravityNativeApp(
                                             )
                                         }
                                     }
+
+                                    // Floating Scroll-to-Bottom button when scrolled up in a long thread
+                                    androidx.compose.animation.AnimatedVisibility(
+                                        visible = showScrollToBottom,
+                                        enter = fadeIn(),
+                                        exit = fadeOut(),
+                                        modifier = Modifier
+                                            .align(Alignment.BottomEnd)
+                                            .padding(end = 16.dp, bottom = 12.dp)
+                                    ) {
+                                        SmallFloatingActionButton(
+                                            onClick = {
+                                                triggerHaptic()
+                                                scope.launch {
+                                                    if (displayedMessages.isNotEmpty()) {
+                                                        listState.animateScrollToItem(displayedMessages.lastIndex)
+                                                    }
+                                                }
+                                            },
+                                            shape = CircleShape,
+                                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                            contentColor = MaterialTheme.colorScheme.onSurface
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.KeyboardArrowDown,
+                                                contentDescription = "Scroll to bottom"
+                                            )
+                                        }
+                                    }
                                 }
 
                                 // Positioned cleanly inside content area so it ALWAYS clears above the composer bar
@@ -460,7 +501,7 @@ fun AntigravityNativeApp(
                         )
                     }
 
-                    // Native Usage Quota Bottom Sheet (with inline refresh status, zero hidden snackbars)
+                    // Native Usage Quota Bottom Sheet (auto-loads on open, inline refresh feedback)
                     if (uiState.isQuotaSheetOpen) {
                         UsageQuotaSheet(
                             quota = uiState.snapshot.quota,
@@ -498,50 +539,57 @@ fun AntigravityNativeApp(
                             onDismiss = { viewModel.setQuickPromptsSheetOpen(false) }
                         )
                     }
-
-                    // Native Settings & Diagnostics Sheet
-                    if (uiState.isSettingsSheetOpen) {
-                        SettingsSheet(
-                            settings = settings,
-                            bridgeStatus = uiState.bridgeStatus,
-                            diagnosticsNote = uiState.snapshot.diagnosticsNote,
-                            onThemeModeChange = {
-                                triggerHaptic()
-                                viewModel.updateThemeMode(it)
-                            },
-                            onDynamicColorChange = {
-                                triggerHaptic()
-                                viewModel.setDynamicColor(it)
-                            },
-                            onFontScaleChange = { viewModel.setFontScale(it) },
-                            onAutoExpandReasoningChange = {
-                                triggerHaptic()
-                                viewModel.setAutoExpandReasoning(it)
-                            },
-                            onHapticFeedbackChange = { viewModel.setHapticFeedback(it) },
-                            onKeepScreenAwakeChange = {
-                                triggerHaptic()
-                                viewModel.setKeepScreenAwake(it)
-                            },
-                            onWebInspectorChange = {
-                                triggerHaptic()
-                                viewModel.setWebInspectorMode(it)
-                            },
-                            onCopyDomSnapshot = {
-                                triggerHaptic()
-                                viewModel.setSettingsSheetOpen(false)
-                                copyDomSnapshot()
-                            },
-                            onSignOut = {
-                                triggerHaptic()
-                                viewModel.clearOptimisticMessages()
-                                viewModel.onBridgeNavigatingToAuth()
-                                bridgeEngine.signOutAndReload()
-                            },
-                            onDismiss = { viewModel.setSettingsSheetOpen(false) }
-                        )
-                    }
                 }
+            }
+
+            // LAYER 2: Full-Screen Native Settings Page
+            AnimatedVisibility(
+                visible = uiState.isSettingsSheetOpen && !showWebOverlay,
+                enter = slideInHorizontally { it } + fadeIn(),
+                exit = slideOutHorizontally { it } + fadeOut(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(2f)
+            ) {
+                SettingsFullScreen(
+                    settings = settings,
+                    bridgeStatus = uiState.bridgeStatus,
+                    diagnosticsNote = uiState.snapshot.diagnosticsNote,
+                    onThemeModeChange = {
+                        triggerHaptic()
+                        viewModel.updateThemeMode(it)
+                    },
+                    onDynamicColorChange = {
+                        triggerHaptic()
+                        viewModel.setDynamicColor(it)
+                    },
+                    onFontScaleChange = { viewModel.setFontScale(it) },
+                    onAutoExpandReasoningChange = {
+                        triggerHaptic()
+                        viewModel.setAutoExpandReasoning(it)
+                    },
+                    onHapticFeedbackChange = { viewModel.setHapticFeedback(it) },
+                    onKeepScreenAwakeChange = {
+                        triggerHaptic()
+                        viewModel.setKeepScreenAwake(it)
+                    },
+                    onWebInspectorChange = {
+                        triggerHaptic()
+                        viewModel.setWebInspectorMode(it)
+                    },
+                    onCopyDomSnapshot = {
+                        triggerHaptic()
+                        viewModel.setSettingsSheetOpen(false)
+                        copyDomSnapshot()
+                    },
+                    onSignOut = {
+                        triggerHaptic()
+                        viewModel.clearOptimisticMessages()
+                        viewModel.onBridgeNavigatingToAuth()
+                        bridgeEngine.signOutAndReload()
+                    },
+                    onBack = { viewModel.setSettingsSheetOpen(false) }
+                )
             }
         }
     }

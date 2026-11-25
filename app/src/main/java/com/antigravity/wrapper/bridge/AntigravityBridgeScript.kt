@@ -1,13 +1,13 @@
 package com.antigravity.wrapper.bridge
 
 /**
- * Self-contained JavaScript engine calibrated to Antigravity's mobile DOM (`[data-testid="mobile-layout"]`):
- * - Conversations: `[data-testid="conversation-row-sidebar"]` (`a[aria-label]`)
- * - Model selector: `[data-testid="model-selector-trigger"]`, `[data-testid="model-selector-panel"]`,
- *   two-step `[data-testid="model-selector-effort-group"]` -> `[data-testid="model-selector-effort-option"]`,
- *   and single-step `[data-testid="model-selector-item"]`
- * - Usage quota: `"View Usage"` inside `[data-testid="model-selector-panel"]`
- * - Composer: `[data-testid="agent-input-box"]`, `[aria-label="Message input"]`, `[data-testid="send-button"]`
+ * Calibrated headless JS bridge for Antigravity mobile (`[data-testid="mobile-layout"]`):
+ * - Uses full Pointer+Mouse event simulation (`simulateTap`) for Radix/Base UI triggers & sheets
+ * - Uses `waitFor` polling instead of brittle fixed timeouts
+ * - Uses DataTransfer `ClipboardEvent('paste')` + `beforeinput`/`insertText` for Lexical/ProseMirror composer
+ * - Separates inline badges/links cleanly and extracts message timestamps out of markdown bodies
+ * - Strictly isolates Usage Quota extraction from the Model Selector and chat messages
+ * - Throttles MutationObserver (no `attributes: true`) to keep 60fps scrolling on Android
  */
 object AntigravityBridgeScript {
 
@@ -17,12 +17,12 @@ object AntigravityBridgeScript {
             window.location.replace('https://antigravity.google.com/remote');
             return;
           }
-          if (window.__agBridge && window.__agBridge.version === 4) {
+          if (window.__agBridge && window.__agBridge.version === 5) {
             window.__agBridge.syncNow();
             return;
           }
 
-          const BRIDGE_VERSION = 4;
+          const BRIDGE_VERSION = 5;
           let cachedModels = [];
           let cachedConversations = [];
           let cachedQuota = {
@@ -36,6 +36,7 @@ object AntigravityBridgeScript {
           let syncTimer = null;
           let lastPayloadHash = '';
           let isInternalModalProbe = false;
+          let modelsPrewarmed = false;
 
           function getAppRoot() {
             return document.querySelector('[data-testid="mobile-layout"]') ||
@@ -62,7 +63,7 @@ object AntigravityBridgeScript {
 
           function collectDeep(root, predicate, limit) {
             const out = [];
-            const max = limit || 2000;
+            const max = limit || 1600;
             const stack = [root || getAppRoot()];
             while (stack.length > 0 && out.length < max) {
               const cur = stack.pop();
@@ -90,6 +91,60 @@ object AntigravityBridgeScript {
             return (str || '').replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
           }
 
+          function simulateTap(el) {
+            if (!el) return false;
+            try {
+              const rect = el.getBoundingClientRect();
+              const cx = rect.left + rect.width / 2;
+              const cy = rect.top + rect.height / 2;
+              const common = {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                view: window,
+                clientX: cx,
+                clientY: cy,
+                button: 0,
+                buttons: 1
+              };
+              if (typeof PointerEvent !== 'undefined') {
+                el.dispatchEvent(new PointerEvent('pointerdown', Object.assign({}, common, { pointerId: 1, pointerType: 'touch', isPrimary: true })));
+              }
+              el.dispatchEvent(new MouseEvent('mousedown', common));
+              if (typeof PointerEvent !== 'undefined') {
+                el.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, common, { buttons: 0, pointerId: 1, pointerType: 'touch', isPrimary: true })));
+              }
+              el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, common, { buttons: 0 })));
+              el.click();
+              return true;
+            } catch (_) {
+              try { el.click(); return true; } catch (__) { return false; }
+            }
+          }
+
+          function waitFor(predicate, timeoutMs, intervalMs) {
+            return new Promise(resolve => {
+              const start = Date.now();
+              const step = intervalMs || 50;
+              function check() {
+                try {
+                  const res = predicate();
+                  if (res) { resolve(res); return; }
+                } catch (_) {}
+                if (Date.now() - start >= (timeoutMs || 1200)) {
+                  resolve(null);
+                  return;
+                }
+                setTimeout(check, step);
+              }
+              check();
+            });
+          }
+
+          function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+          }
+
           function extractTexFromMathNode(el) {
             const ann = el.querySelector && el.querySelector('annotation[encoding="application/x-tex"], annotation');
             if (ann && ann.textContent) return ann.textContent.trim();
@@ -112,6 +167,10 @@ object AntigravityBridgeScript {
               aria.includes('thought') || aria.includes('reasoning');
           }
 
+          function isRelativeTimestampText(txt) {
+            return /^(\d+\s*(?:s|sec|secs|m|min|mins|h|hr|hrs|d|w)\s*ago|\d+\s*[smhdw]|just now|now)$/i.test(txt);
+          }
+
           function nodeToMarkdown(node, depth) {
             if (!node) return '';
             if (depth > 48) return '';
@@ -122,6 +181,12 @@ object AntigravityBridgeScript {
             if (tag === 'script' || tag === 'style' || tag === 'svg' || tag === 'noscript') return '';
             if (node.getAttribute('aria-hidden') === 'true' && !node.classList.contains('katex')) return '';
             if (tag === 'button' && cleanText(node.textContent).length <= 24) return '';
+
+            // Skip standalone relative timestamp chips (extracted separately to message header)
+            if ((tag === 'time' || tag === 'span' || tag === 'div') && node.children.length === 0) {
+              const leaf = cleanText(node.textContent);
+              if (isRelativeTimestampText(leaf)) return '';
+            }
 
             const cls = (typeof node.className === 'string' ? node.className : '').toLowerCase();
             if (cls.includes('katex-display') || (tag === 'mjx-container' && node.getAttribute('display') === 'true')) {
@@ -145,8 +210,8 @@ object AntigravityBridgeScript {
             }
 
             if (tag === 'code') {
-              const txt = (node.textContent || '').replace(/`/g, "'");
-              return '`' + txt + '`';
+              const txt = (node.textContent || '').replace(/`/g, "'").trim();
+              return txt ? (' `' + txt + '` ') : '';
             }
 
             if (tag === 'br') return '\n';
@@ -164,25 +229,25 @@ object AntigravityBridgeScript {
               case 'strong':
               case 'b': {
                 const t = childrenMd.trim();
-                return t ? ('**' + t + '**') : '';
+                return t ? (' **' + t + '** ') : '';
               }
               case 'em':
               case 'i': {
                 const t = childrenMd.trim();
-                return t ? ('*' + t + '*') : '';
+                return t ? (' *' + t + '* ') : '';
               }
               case 'del':
               case 's': {
                 const t = childrenMd.trim();
-                return t ? ('~~' + t + '~~') : '';
+                return t ? (' ~~' + t + '~~ ') : '';
               }
               case 'a': {
                 const href = node.getAttribute('href') || '';
                 const label = cleanText(childrenMd) || href;
                 if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
-                  return '[' + label + '](' + href + ')';
+                  return ' [' + label + '](' + href + ') ';
                 }
-                return label;
+                return label ? (' ' + label + ' ') : '';
               }
               case 'p': {
                 const t = childrenMd.trim();
@@ -218,19 +283,47 @@ object AntigravityBridgeScript {
                 const body = mdRows.slice(1).map(r => '| ' + r.join(' | ') + ' |');
                 return '\n\n' + [header, sep, ...body].join('\n') + '\n\n';
               }
+              case 'span': {
+                // Separate pill/badge spans cleanly from adjacent words
+                if (cls.includes('rounded') || cls.includes('badge') || cls.includes('pill') || cls.includes('chip')) {
+                  const t = childrenMd.trim();
+                  return t ? (' ' + t + ' ') : '';
+                }
+                return childrenMd;
+              }
               default:
                 return childrenMd;
             }
           }
 
           function normalizeMarkdown(md) {
-            return (md || '').replace(/\n{3,}/g, '\n\n').trim();
+            return (md || '')
+              .replace(/[ \t]{2,}/g, ' ')
+              .replace(/ ([.,;:!?])/g, '$1')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim();
+          }
+
+          function extractMessageTimestamp(container) {
+            const timeEl = container.querySelector('time');
+            if (timeEl) {
+              const t = cleanText(timeEl.textContent);
+              if (t && t.length <= 24) return t;
+            }
+            const leaves = container.querySelectorAll('span, div');
+            for (let i = 0; i < Math.min(leaves.length, 60); i++) {
+              const el = leaves[i];
+              if (el.children.length > 0) continue;
+              const t = cleanText(el.textContent);
+              if (isRelativeTimestampText(t)) return t;
+            }
+            return '';
           }
 
           function extractReasoningBlocks(container, msgIndex) {
             const blocks = [];
             const seen = new Set();
-            const nodes = collectDeep(container, el => isReasoningElement(el), 40);
+            const nodes = collectDeep(container, el => isReasoningElement(el), 30);
             nodes.forEach((el, idx) => {
               if (seen.has(el)) return;
               for (const prev of seen) {
@@ -291,7 +384,7 @@ object AntigravityBridgeScript {
               if (el.isContentEditable && isVisible(el)) return true;
               if (el.getAttribute('role') === 'textbox' && isVisible(el)) return true;
               return false;
-            }, 30);
+            }, 25);
             if (!candidates.length) return null;
             candidates.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
             return candidates[0];
@@ -310,8 +403,9 @@ object AntigravityBridgeScript {
             if (!btn) return '';
             const aria = btn.getAttribute('aria-label') || '';
             const m = aria.match(/current:\s*(.+)$/i);
-            if (m && m[1]) return cleanText(m[1]);
-            return cleanText(btn.textContent);
+            const raw = m && m[1] ? cleanText(m[1]) : cleanText(btn.textContent);
+            if (/^no model selected$|^select model$/i.test(raw)) return '';
+            return raw;
           }
 
           function parseAriaCurrentValue(selector) {
@@ -325,9 +419,9 @@ object AntigravityBridgeScript {
           function dismissOverlays() {
             const backdrops = document.querySelectorAll('[data-testid="bottom-sheet-backdrop"]');
             backdrops.forEach(b => {
-              if (isVisible(b)) b.click();
+              if (isVisible(b)) simulateTap(b);
             });
-            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
           }
 
           function extractRelativeTime(row, cleanTitle) {
@@ -335,9 +429,7 @@ object AntigravityBridgeScript {
             for (const sp of spans) {
               const txt = cleanText(sp.textContent);
               if (!txt || txt === cleanTitle) continue;
-              if (/^(\d+\s*(?:s|m|h|d|w|mo|y)|just now|now|today|yesterday)$/i.test(txt)) {
-                return txt;
-              }
+              if (isRelativeTimestampText(txt)) return txt;
             }
             return '';
           }
@@ -362,9 +454,7 @@ object AntigravityBridgeScript {
               const href = anchor.getAttribute('href') || '';
               let fullUrl = '';
               if (href && !href.startsWith('#')) {
-                try {
-                  fullUrl = new URL(href, window.location.origin).href;
-                } catch (_) {}
+                try { fullUrl = new URL(href, window.location.origin).href; } catch (_) {}
               }
 
               const updatedLabel = extractRelativeTime(row, title);
@@ -395,7 +485,6 @@ object AntigravityBridgeScript {
 
           function extractMessages() {
             const root = getAppRoot();
-            // Do not mistake the sidebar conversation list screen for messages
             const sidebarList = root.querySelector('[data-testid="conversation-list-sidebar"]');
             const sidebarVisible = sidebarList && isVisible(sidebarList) &&
               sidebarList.getBoundingClientRect().width > window.innerWidth * 0.6;
@@ -412,7 +501,7 @@ object AntigravityBridgeScript {
                 return isVisible(el) && cleanText(el.textContent).length > 0;
               }
               return false;
-            }, 300);
+            }, 250);
 
             if (turns.length === 0) {
               turns = collectDeep(root, el => {
@@ -425,7 +514,7 @@ object AntigravityBridgeScript {
                   return true;
                 }
                 return false;
-              }, 300);
+              }, 250);
             }
 
             const topTurns = turns.filter((el, idx) => {
@@ -450,6 +539,7 @@ object AntigravityBridgeScript {
               const isUser = /\b(user|human|prompt|query|request)\b/.test(roleHint) &&
                 !/\b(assistant|model|agent|response|reply)\b/.test(roleHint);
 
+              const timestamp = extractMessageTimestamp(el);
               const reasoning = isUser ? [] : extractReasoningBlocks(el, idx);
               const artifacts = isUser ? [] : extractArtifacts(el, idx);
               const markdown = normalizeMarkdown(nodeToMarkdown(el, 0));
@@ -460,6 +550,7 @@ object AntigravityBridgeScript {
                 id: el.getAttribute('data-message-id') || el.id || ('msg-' + idx),
                 role: isUser ? 'user' : 'assistant',
                 markdown: markdown,
+                timestamp: timestamp,
                 reasoning: reasoning,
                 artifacts: artifacts,
                 isStreaming: false
@@ -506,7 +597,8 @@ object AntigravityBridgeScript {
                 const name = fullText;
                 if (!name || seen.has(name)) return;
                 seen.add(name);
-                const isSelected = activeModel.toLowerCase().includes(name.toLowerCase().replace(/\s*\([^)]+\)\s*$/, ''));
+                const base = name.replace(/\s*\([^)]+\)\s*$/, '').toLowerCase();
+                const isSelected = activeModel.toLowerCase().startsWith(base);
                 items.push({
                   id: 'item-' + idx + '-' + name,
                   name: name,
@@ -522,50 +614,47 @@ object AntigravityBridgeScript {
             return items;
           }
 
-          function extractQuotaFromScope(scope) {
-            if (!scope) return null;
-            const meters = collectDeep(scope, el => {
-              const role = el.getAttribute('role') || '';
-              const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-              const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
-              const tid = (el.getAttribute('data-testid') || '').toLowerCase();
-              return role === 'progressbar' || (el.tagName || '').toLowerCase() === 'meter' ||
-                aria.includes('quota') || aria.includes('usage') || aria.includes('limit') ||
-                cls.includes('quota') || cls.includes('usage') || tid.includes('quota') || tid.includes('usage');
-            }, 40);
+          function parseUsageDialog(dialog) {
+            if (!dialog) return null;
+            // NEVER scrape the model selector panel as usage data!
+            if (dialog.querySelector('[data-testid="model-selector-panel"]') ||
+                dialog.querySelector('[data-testid="model-selector-effort-group"]') ||
+                dialog.querySelector('[data-testid="conversation-list-sidebar"]')) {
+              return null;
+            }
+            const rawLines = (dialog.innerText || '')
+              .split('\n')
+              .map(cleanText)
+              .filter(line => line.length > 0 && !/^view usage$/i.test(line));
+            if (rawLines.length === 0) return null;
 
-            for (const el of meters) {
-              const now = parseFloat(el.getAttribute('aria-valuenow') || el.value || '');
-              const max = parseFloat(el.getAttribute('aria-valuemax') || el.max || '100');
-              const txt = cleanText(el.getAttribute('aria-label') || el.textContent);
-              const pctMatch = txt.match(/(\d{1,3})\s*%/);
-              const pct = !isNaN(now) && max > 0 ? (now / max) * 100 : (pctMatch ? parseFloat(pctMatch[1]) : null);
-              if (pct !== null || /quota|usage|remaining|limit|reset/i.test(txt)) {
-                return {
-                  usedPercent: pct,
-                  remainingLabel: txt.slice(0, 90),
-                  resetLabel: '',
-                  planLabel: 'Antigravity',
-                  rawSummary: txt.slice(0, 180),
-                  isLive: true
-                };
-              }
+            const joined = rawLines.join(' • ');
+            if (/gemini 4 neon.*gemini 4 carbon/i.test(joined)) return null;
+
+            let usedPct = null;
+            const pb = dialog.querySelector('[role="progressbar"], meter');
+            if (pb) {
+              const now = parseFloat(pb.getAttribute('aria-valuenow') || pb.value || '');
+              const max = parseFloat(pb.getAttribute('aria-valuemax') || pb.max || '100');
+              if (!isNaN(now) && max > 0) usedPct = Math.round((now / max) * 100);
+            }
+            if (usedPct === null) {
+              const pctMatch = joined.match(/(\d{1,3})\s*%/);
+              if (pctMatch) usedPct = parseFloat(pctMatch[1]);
             }
 
-            const dialogText = cleanText(scope.innerText || '');
-            if (dialogText && /(usage|quota|limit|remaining|reset|credits|%)/i.test(dialogText)) {
-              const pctMatch = dialogText.match(/(\d{1,3})\s*%/);
-              const resetMatch = dialogText.match(/(resets?\s+[^\n.]{2,40})/i);
-              return {
-                usedPercent: pctMatch ? parseFloat(pctMatch[1]) : null,
-                remainingLabel: dialogText.slice(0, 90),
-                resetLabel: resetMatch ? resetMatch[1] : '',
-                planLabel: 'Antigravity',
-                rawSummary: dialogText.slice(0, 200),
-                isLive: true
-              };
-            }
-            return null;
+            const resetLine = rawLines.find(l => /resets?\s+in|resets?\s+at|resets?\s+on/i.test(l)) || '';
+            const statusLine = rawLines.find(l => l !== resetLine && /(remaining|used|quota|limit|available|credits|%)/i.test(l)) || rawLines[0] || '';
+            const planLine = rawLines.find(l => /(ultra|pro|standard|free|enterprise|workspace|plan)/i.test(l) && l.length < 36) || 'Antigravity';
+
+            return {
+              usedPercent: usedPct,
+              remainingLabel: statusLine.slice(0, 64),
+              resetLabel: resetLine.slice(0, 48),
+              planLabel: planLine,
+              rawSummary: statusLine.slice(0, 96),
+              isLive: true
+            };
           }
 
           function detectStreaming() {
@@ -610,9 +699,6 @@ object AntigravityBridgeScript {
             }
             const conversations = authRequired ? [] : extractConversations();
 
-            const liveQuota = authRequired ? null : extractQuotaFromScope(getAppRoot());
-            if (liveQuota) cachedQuota = liveQuota;
-
             const activeConv = conversations.find(c => c.isActive);
             let title = activeConv ? activeConv.title : 'Antigravity';
             if (!activeConv) {
@@ -623,19 +709,10 @@ object AntigravityBridgeScript {
               }
             }
 
-            if (activeModel && cachedModels.length === 0) {
-              cachedModels = [{
-                id: activeModel,
-                name: activeModel,
-                tier: '',
-                description: '',
-                hasEffortLevels: false,
-                effortOptions: [],
-                isSelected: true
-              }];
-            } else if (activeModel) {
+            if (activeModel && cachedModels.length > 0) {
               cachedModels = cachedModels.map(m => {
-                const selected = activeModel.toLowerCase().startsWith(m.name.toLowerCase().replace(/\s*\([^)]+\)\s*$/, ''));
+                const base = m.name.toLowerCase().replace(/\s*\([^)]+\)\s*$/, '');
+                const selected = activeModel.toLowerCase().startsWith(base);
                 const effortMatch = selected ? activeModel.match(/\b(Low|Medium|High|Extra|Fast)\b/i) : null;
                 return Object.assign({}, m, {
                   isSelected: selected,
@@ -685,14 +762,18 @@ object AntigravityBridgeScript {
 
           function scheduleSync() {
             if (isInternalModalProbe) return;
-            if (syncTimer) clearTimeout(syncTimer);
-            syncTimer = setTimeout(syncNow, 220);
+            if (syncTimer) return; // Leading-edge throttle to prevent main-thread flood during scroll
+            const delay = detectStreaming() ? 360 : 900;
+            syncTimer = setTimeout(() => {
+              syncTimer = null;
+              syncNow(false);
+            }, delay);
           }
 
-          function sendPrompt(text) {
+          async function sendPrompt(text) {
             const input = findComposerInput();
-            if (!input) return false;
-            input.focus();
+            if (!input || !text) return false;
+
             const tag = (input.tagName || '').toLowerCase();
             if (tag === 'textarea' || tag === 'input') {
               const proto = tag === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
@@ -701,23 +782,78 @@ object AntigravityBridgeScript {
               else input.value = text;
               input.dispatchEvent(new Event('input', { bubbles: true }));
               input.dispatchEvent(new Event('change', { bubbles: true }));
-            } else if (input.isContentEditable) {
-              input.textContent = '';
-              document.execCommand('insertText', false, text);
-              input.dispatchEvent(new Event('input', { bubbles: true }));
+            } else {
+              // Lexical / ProseMirror contenteditable injection
+              try { input.focus(); } catch (_) {}
+              try {
+                const range = document.createRange();
+                range.selectNodeContents(input);
+                const sel = window.getSelection();
+                if (sel) {
+                  sel.removeAllRanges();
+                  sel.addRange(range);
+                }
+              } catch (_) {}
+
+              // Method 1: Synthetic ClipboardEvent('paste') — handled natively by Lexical/ProseMirror
+              let inserted = false;
+              try {
+                const dt = new DataTransfer();
+                dt.setData('text/plain', text);
+                const pasteEvent = new ClipboardEvent('paste', {
+                  bubbles: true,
+                  cancelable: true,
+                  clipboardData: dt
+                });
+                input.dispatchEvent(pasteEvent);
+                await sleep(50);
+                if (cleanText(input.textContent).includes(text.slice(0, Math.min(text.length, 16)))) {
+                  inserted = true;
+                }
+              } catch (_) {}
+
+              // Method 2: InputEvent beforeinput + execCommand('insertText')
+              if (!inserted) {
+                try {
+                  input.dispatchEvent(new InputEvent('beforeinput', {
+                    bubbles: true,
+                    cancelable: true,
+                    inputType: 'insertText',
+                    data: text
+                  }));
+                  document.execCommand('insertText', false, text);
+                  input.dispatchEvent(new InputEvent('input', {
+                    bubbles: true,
+                    inputType: 'insertText',
+                    data: text
+                  }));
+                  await sleep(50);
+                  if (cleanText(input.textContent).length > 0) inserted = true;
+                } catch (_) {}
+              }
+
+              // Method 3: Direct paragraph fallback
+              if (!inserted) {
+                input.textContent = text;
+                input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+              }
             }
 
-            setTimeout(() => {
-              const sendBtn = getAppRoot().querySelector('[data-testid="send-button"], button[aria-label="Send message"]');
-              if (sendBtn && !sendBtn.disabled && isVisible(sendBtn)) {
-                sendBtn.click();
-              } else {
-                const enterEv = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true });
-                input.dispatchEvent(enterEv);
-              }
-              setTimeout(() => syncNow(true), 250);
-              setTimeout(() => syncNow(true), 900);
-            }, 90);
+            // Wait for [data-testid="send-button"] to become enabled
+            const sendBtn = await waitFor(() => {
+              const btn = getAppRoot().querySelector('[data-testid="send-button"], button[aria-label="Send message"]');
+              return (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' && isVisible(btn)) ? btn : null;
+            }, 600, 50);
+
+            if (sendBtn) {
+              simulateTap(sendBtn);
+            } else {
+              input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+              input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+            }
+
+            setTimeout(() => syncNow(true), 350);
+            setTimeout(() => syncNow(true), 1100);
             return true;
           }
 
@@ -730,145 +866,153 @@ object AntigravityBridgeScript {
               return label.includes('stop') || label.includes('cancel');
             }, 15);
             if (stopBtns.length > 0) {
-              stopBtns[0].click();
-              scheduleSync();
+              simulateTap(stopBtns[0]);
+              setTimeout(() => syncNow(true), 250);
               return true;
             }
             return false;
           }
 
-          function refreshModels() {
+          async function refreshModels() {
             const btn = findModelSelectorButton();
-            if (!btn) return false;
+            if (!btn || isInternalModalProbe) return false;
             const activeModel = parseActiveModelName(btn);
             isInternalModalProbe = true;
-            const alreadyOpen = !!document.querySelector('[data-testid="model-selector-panel"]');
-            if (!alreadyOpen) btn.click();
-
-            setTimeout(() => {
-              const parsed = readModelsFromOpenPanel(activeModel);
-              if (parsed.length > 0) cachedModels = parsed;
+            try {
+              if (!document.querySelector('[data-testid="model-selector-panel"]')) {
+                simulateTap(btn);
+              }
+              const panel = await waitFor(() => document.querySelector('[data-testid="model-selector-panel"]'), 1000, 40);
+              if (panel) {
+                const parsed = readModelsFromOpenPanel(activeModel);
+                if (parsed.length > 0) cachedModels = parsed;
+              }
               dismissOverlays();
-              setTimeout(() => {
-                isInternalModalProbe = false;
-                syncNow(true);
-              }, 120);
-            }, 260);
+              await sleep(160);
+            } finally {
+              isInternalModalProbe = false;
+              syncNow(true);
+            }
             return true;
           }
 
-          function selectModel(modelName, effortTier) {
+          async function selectModel(modelName, effortTier) {
             const btn = findModelSelectorButton();
             if (!btn) return false;
+            // Wait if a background probe is finishing
+            if (isInternalModalProbe) {
+              await waitFor(() => !isInternalModalProbe, 1200, 40);
+            }
             isInternalModalProbe = true;
-            const alreadyOpen = !!document.querySelector('[data-testid="model-selector-panel"]');
-            if (!alreadyOpen) btn.click();
-
-            setTimeout(() => {
-              const panel = document.querySelector('[data-testid="model-selector-panel"]');
-              if (!panel) {
-                dismissOverlays();
-                isInternalModalProbe = false;
-                syncNow(true);
-                return;
+            try {
+              if (!document.querySelector('[data-testid="model-selector-panel"]')) {
+                simulateTap(btn);
               }
+              const panel = await waitFor(() => document.querySelector('[data-testid="model-selector-panel"]'), 1200, 40);
+              if (!panel) return false;
 
-              const targetLower = (modelName || '').toLowerCase();
-              // 1. Check direct model-selector-item buttons first (e.g. GPT-OSS 120B)
+              const targetLower = (modelName || '').toLowerCase().trim();
+
+              // 1. Direct single-step model (e.g., GPT-OSS 120B)
               const directItems = Array.from(panel.querySelectorAll('button[data-testid="model-selector-item"]'));
               const directMatch = directItems.find(b => cleanText(b.textContent).toLowerCase().includes(targetLower));
               if (directMatch) {
-                directMatch.click();
-                setTimeout(() => {
-                  dismissOverlays();
-                  isInternalModalProbe = false;
-                  syncNow(true);
-                }, 220);
-                return;
+                simulateTap(directMatch);
+                await sleep(300);
+                return true;
               }
 
-              // 2. Check two-step effort-group buttons (e.g. Gemini 4 Neon -> High/Medium/Low/Extra)
+              // 2. Two-step effort-group model (e.g., Gemini 4 Argon -> Medium/High/Extra)
               const groupSpans = Array.from(panel.querySelectorAll('[data-testid="model-selector-effort-group"]'));
               const groupMatch = groupSpans.find(s => cleanText(s.textContent).toLowerCase() === targetLower) ||
                 groupSpans.find(s => cleanText(s.textContent).toLowerCase().includes(targetLower));
 
               if (!groupMatch) {
                 dismissOverlays();
-                isInternalModalProbe = false;
-                syncNow(true);
-                return;
+                return false;
               }
 
               const groupBtn = groupMatch.closest('button') || groupMatch;
-              groupBtn.click();
+              simulateTap(groupBtn);
 
-              // 3. Pick effort tier in the sub-panel
-              setTimeout(() => {
-                const optionSpans = Array.from(document.querySelectorAll('[data-testid="model-selector-effort-option"]'))
+              // 3. Wait for the effort sub-panel options to become visible & interactive
+              const optionSpans = await waitFor(() => {
+                const opts = Array.from(document.querySelectorAll('[data-testid="model-selector-effort-option"]'))
                   .filter(isVisible);
-                const desiredTier = (effortTier || 'Medium').toLowerCase();
-                const optionMatch =
+                return opts.length > 0 ? opts : null;
+              }, 1000, 40);
+
+              if (optionSpans) {
+                const desiredTier = (effortTier || 'Medium').toLowerCase().trim();
+                const match =
                   optionSpans.find(s => cleanText(s.textContent).toLowerCase() === desiredTier) ||
                   optionSpans.find(s => cleanText(s.textContent).toLowerCase() === 'medium') ||
                   optionSpans[0];
-
-                if (optionMatch) {
-                  const optBtn = optionMatch.closest('button') || optionMatch;
-                  optBtn.click();
-                } else {
-                  dismissOverlays();
+                if (match) {
+                  simulateTap(match.closest('button') || match);
+                  await sleep(300);
                 }
+              }
 
-                setTimeout(() => {
-                  dismissOverlays();
-                  isInternalModalProbe = false;
-                  syncNow(true);
-                }, 260);
-              }, 260);
-            }, 260);
+              if (document.querySelector('[data-testid="bottom-sheet-backdrop"]')) {
+                dismissOverlays();
+                await sleep(140);
+              }
+            } finally {
+              isInternalModalProbe = false;
+              syncNow(true);
+            }
             return true;
           }
 
-          function refreshQuota() {
+          async function refreshQuota() {
             const btn = findModelSelectorButton();
             if (!btn) {
               syncNow(true);
               return false;
             }
+            if (isInternalModalProbe) {
+              await waitFor(() => !isInternalModalProbe, 1200, 40);
+            }
             isInternalModalProbe = true;
-            const alreadyOpen = !!document.querySelector('[data-testid="model-selector-panel"]');
-            if (!alreadyOpen) btn.click();
-
-            setTimeout(() => {
-              const panel = document.querySelector('[data-testid="model-selector-panel"]');
+            try {
+              if (!document.querySelector('[data-testid="model-selector-panel"]')) {
+                simulateTap(btn);
+              }
+              const panel = await waitFor(() => document.querySelector('[data-testid="model-selector-panel"]'), 1000, 40);
               const usageBtn = panel && Array.from(panel.querySelectorAll('button.agy-overlay-item'))
                 .find(b => /view usage/i.test(cleanText(b.textContent)));
 
               if (!usageBtn) {
                 dismissOverlays();
-                isInternalModalProbe = false;
-                syncNow(true);
-                return;
+                return false;
               }
 
-              usageBtn.click();
-              setTimeout(() => {
+              simulateTap(usageBtn);
+
+              // Wait for a Usage dialog that is NOT the model-selector-panel
+              const usageDialog = await waitFor(() => {
                 const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-testid="bottom-sheet"]'))
                   .filter(isVisible);
                 for (let i = dialogs.length - 1; i >= 0; i--) {
-                  const parsed = extractQuotaFromScope(dialogs[i]);
-                  if (parsed) {
-                    cachedQuota = parsed;
-                    break;
+                  if (!dialogs[i].querySelector('[data-testid="model-selector-panel"]') &&
+                      !dialogs[i].querySelector('[data-testid="model-selector-effort-group"]')) {
+                    return dialogs[i];
                   }
                 }
-                dismissOverlays();
-                setTimeout(() => {
-                  isInternalModalProbe = false;
-                  syncNow(true);
-                }, 160);
-              }, 500);
-            }, 260);
+                return null;
+              }, 1600, 60);
+
+              if (usageDialog) {
+                const parsed = parseUsageDialog(usageDialog);
+                if (parsed) cachedQuota = parsed;
+              }
+              dismissOverlays();
+              await sleep(160);
+            } finally {
+              isInternalModalProbe = false;
+              syncNow(true);
+            }
             return true;
           }
 
@@ -876,12 +1020,25 @@ object AntigravityBridgeScript {
             const root = getAppRoot();
             const newBtn = root.querySelector('button[aria-label="New Conversation"], a[aria-label="New Conversation in Project"]');
             if (newBtn && isVisible(newBtn)) {
-              newBtn.click();
-              setTimeout(() => syncNow(true), 300);
+              simulateTap(newBtn);
+              setTimeout(() => syncNow(true), 350);
               return true;
             }
             window.location.href = 'https://antigravity.google.com/remote';
             return true;
+          }
+
+          function findMobileBackButton() {
+            const root = getAppRoot();
+            const byAria = root.querySelector('button[aria-label*="back" i], button[aria-label*="conversations" i], button[aria-label*="sidebar" i]');
+            if (byAria && isVisible(byAria)) return byAria;
+            // Fallback: top-leftmost compact icon button inside mobile-layout
+            const topBtns = Array.from(root.querySelectorAll('button')).filter(b => {
+              if (!isVisible(b)) return false;
+              const r = b.getBoundingClientRect();
+              return r.top >= 0 && r.top < 110 && r.left >= 0 && r.left < 64 && r.width <= 56 && r.height <= 56;
+            });
+            return topBtns[0] || null;
           }
 
           function clickSidebarRow(url, title) {
@@ -899,9 +1056,9 @@ object AntigravityBridgeScript {
                 try { fullUrl = new URL(href, window.location.origin).href; } catch (_) {}
               }
               if ((url && fullUrl === url) || (targetTitle && aria === targetTitle)) {
-                anchor.click();
-                setTimeout(() => syncNow(true), 300);
-                setTimeout(() => syncNow(true), 900);
+                simulateTap(anchor);
+                setTimeout(() => syncNow(true), 350);
+                setTimeout(() => syncNow(true), 950);
                 setTimeout(() => syncNow(true), 1800);
                 return true;
               }
@@ -909,21 +1066,22 @@ object AntigravityBridgeScript {
             return false;
           }
 
-          function selectConversation(url, title) {
-            if (clickSidebarRow(url, title)) {
-              return true;
+          async function selectConversation(url, title) {
+            if (clickSidebarRow(url, title)) return true;
+
+            const backBtn = findMobileBackButton();
+            if (backBtn) {
+              simulateTap(backBtn);
+              const rowsReady = await waitFor(
+                () => getAppRoot().querySelectorAll('[data-testid="conversation-row-sidebar"]').length > 0,
+                1600,
+                50
+              );
+              if (rowsReady && clickSidebarRow(url, title)) {
+                return true;
+              }
             }
-            // If currently inside a thread on mobile, navigate back to the sidebar first, then click the row
-            const backBtn = getAppRoot().querySelector('button[aria-label="Back"], button[aria-label*="Conversations" i]');
-            if (backBtn && isVisible(backBtn)) {
-              backBtn.click();
-              setTimeout(() => {
-                if (!clickSidebarRow(url, title) && url && url.startsWith('https://antigravity.google.com/remote')) {
-                  window.location.href = url;
-                }
-              }, 320);
-              return true;
-            }
+
             if (url && url.startsWith('https://antigravity.google.com/remote')) {
               window.location.href = url;
               return true;
@@ -940,7 +1098,7 @@ object AntigravityBridgeScript {
             }
             const addBtn = root.querySelector('button[aria-label="Add context"]');
             if (addBtn && isVisible(addBtn)) {
-              addBtn.click();
+              simulateTap(addBtn);
               return true;
             }
             return false;
@@ -1020,9 +1178,10 @@ object AntigravityBridgeScript {
             });
           }
 
+          // Observe ONLY structural/text changes (no `attributes: true`) to keep 60fps UI
           const observer = new MutationObserver(scheduleSync);
           if (document.body) {
-            observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
+            observer.observe(document.body, { childList: true, subtree: true, characterData: true });
           }
 
           window.__agBridge = {
@@ -1041,15 +1200,21 @@ object AntigravityBridgeScript {
 
           syncNow(true);
           setTimeout(() => syncNow(true), 900);
-          setTimeout(() => syncNow(true), 2200);
           let hydrateTicks = 0;
           const hydrateInterval = setInterval(() => {
             hydrateTicks++;
             syncNow(false);
-            if (hydrateTicks >= 6 || document.querySelector('[data-testid="model-selector-trigger"]')) {
+            const trigger = findModelSelectorButton();
+            if (trigger) {
+              if (!modelsPrewarmed && cachedModels.length === 0) {
+                modelsPrewarmed = true;
+                setTimeout(() => refreshModels(), 500);
+              }
+              clearInterval(hydrateInterval);
+            } else if (hydrateTicks >= 8) {
               clearInterval(hydrateInterval);
             }
-          }, 1800);
+          }, 1500);
         })();
     """.trimIndent()
 
