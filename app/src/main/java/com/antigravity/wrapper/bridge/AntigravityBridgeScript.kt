@@ -1,13 +1,13 @@
 package com.antigravity.wrapper.bridge
 
 /**
- * Calibrated headless JS bridge for Antigravity mobile (`[data-testid="mobile-layout"]`):
- * - Uses full Pointer+Mouse event simulation (`simulateTap`) for Radix/Base UI triggers & sheets
- * - Uses `waitFor` polling instead of brittle fixed timeouts
- * - Uses DataTransfer `ClipboardEvent('paste')` + `beforeinput`/`insertText` for Lexical/ProseMirror composer
- * - Separates inline badges/links cleanly and extracts message timestamps out of markdown bodies
- * - Strictly isolates Usage Quota extraction from the Model Selector and chat messages
- * - Throttles MutationObserver (no `attributes: true`) to keep 60fps scrolling on Android
+ * Calibrated headless JS bridge using Antigravity's exact mobile DOM `data-testid`s:
+ * - Navigation: `mobile-back-to-home`, `breadcrumb-segment`, `conversation-row-sidebar`
+ * - Messages: `conversation-view`, `user-message` / `user-message-content`, `agent-response`,
+ *   `worked-for-collapsible`, `entity-pill`, `artifact-card`, `changed-files-card`
+ * - Composer: `agent-input-box`, `[aria-label="Message input"]`, `send-button`
+ * - Models & Usage: `model-selector-trigger`, `model-selector-panel`, `model-selector-effort-group`,
+ *   `model-selector-effort-option`, `model-selector-item`, and sibling View Usage pane
  */
 object AntigravityBridgeScript {
 
@@ -17,12 +17,12 @@ object AntigravityBridgeScript {
             window.location.replace('https://antigravity.google.com/remote');
             return;
           }
-          if (window.__agBridge && window.__agBridge.version === 5) {
+          if (window.__agBridge && window.__agBridge.version === 6) {
             window.__agBridge.syncNow();
             return;
           }
 
-          const BRIDGE_VERSION = 5;
+          const BRIDGE_VERSION = 6;
           let cachedModels = [];
           let cachedConversations = [];
           let cachedQuota = {
@@ -53,6 +53,12 @@ object AntigravityBridgeScript {
             }
             const rect = el.getBoundingClientRect();
             return rect.width > 0 || rect.height > 0;
+          }
+
+          function isScreenReaderOnly(el) {
+            if (!el || el.nodeType !== 1) return false;
+            const cls = typeof el.className === 'string' ? el.className : '';
+            return /\bsr-only\b|\bvisually-hidden\b|\bscreen-reader-text\b/i.test(cls);
           }
 
           function isGoogleBar(el) {
@@ -157,14 +163,30 @@ object AntigravityBridgeScript {
 
           function isReasoningElement(el) {
             if (!el || el.nodeType !== 1) return false;
+            const tid = (el.getAttribute('data-testid') || '').toLowerCase();
+            if (tid === 'worked-for-collapsible' || tid.includes('thought') || tid.includes('reason')) return true;
             const tag = (el.tagName || '').toLowerCase();
-            const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
-            const testId = (el.getAttribute('data-testid') || '').toLowerCase();
-            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
             if (tag === 'details') return true;
-            return cls.includes('thought') || cls.includes('thinking') || cls.includes('reasoning') ||
-              testId.includes('thought') || testId.includes('reason') ||
-              aria.includes('thought') || aria.includes('reasoning');
+            const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
+            return cls.includes('thought') || cls.includes('thinking') || cls.includes('reasoning');
+          }
+
+          function isExcludedFromMarkdown(el) {
+            if (!el || el.nodeType !== 1) return false;
+            if (isScreenReaderOnly(el)) return true;
+            const tid = (el.getAttribute('data-testid') || '').toLowerCase();
+            if (tid === 'worked-for-collapsible' ||
+                tid === 'turn-cards-container' ||
+                tid === 'artifact-card' ||
+                tid === 'changed-files-card' ||
+                tid === 'cascade-system-message-toolbar' ||
+                tid === 'user-message-actions' ||
+                tid === 'revert-button') {
+              return true;
+            }
+            const tag = (el.tagName || '').toLowerCase();
+            if (tag === 'fieldset' && /response actions/i.test(el.getAttribute('aria-label') || '')) return true;
+            return false;
           }
 
           function isRelativeTimestampText(txt) {
@@ -177,15 +199,32 @@ object AntigravityBridgeScript {
             if (node.nodeType === 3) return node.nodeValue || '';
             if (node.nodeType !== 1) return '';
 
+            if (isExcludedFromMarkdown(node) || isReasoningElement(node)) return '';
+
             const tag = (node.tagName || '').toLowerCase();
             if (tag === 'script' || tag === 'style' || tag === 'svg' || tag === 'noscript') return '';
             if (node.getAttribute('aria-hidden') === 'true' && !node.classList.contains('katex')) return '';
+
+            // Preserve Antigravity entity pills (files, symbols, PRs) cleanly instead of stripping buttons!
+            const tid = (node.getAttribute('data-testid') || '').toLowerCase();
+            if (tid === 'entity-pill') {
+              const label = cleanText(node.textContent);
+              if (!label) return '';
+              const anchor = tag === 'a' ? node : (node.querySelector && node.querySelector('a'));
+              const href = anchor ? (anchor.getAttribute('href') || '') : '';
+              if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+                return ' [' + label + '](' + href + ') ';
+              }
+              return ' `' + label + '` ';
+            }
+
             if (tag === 'button' && cleanText(node.textContent).length <= 24) return '';
 
-            // Skip standalone relative timestamp chips (extracted separately to message header)
+            // Skip standalone relative timestamp chips (extracted to message header)
             if ((tag === 'time' || tag === 'span' || tag === 'div') && node.children.length === 0) {
               const leaf = cleanText(node.textContent);
               if (isRelativeTimestampText(leaf)) return '';
+              if (/^(you said|agent said)$/i.test(leaf)) return '';
             }
 
             const cls = (typeof node.className === 'string' ? node.className : '').toLowerCase();
@@ -197,8 +236,6 @@ object AntigravityBridgeScript {
               const tex = extractTexFromMathNode(node);
               return tex ? (' $' + tex + '$ ') : '';
             }
-
-            if (isReasoningElement(node)) return '';
 
             if (tag === 'pre') {
               const codeEl = node.querySelector('code') || node;
@@ -283,14 +320,6 @@ object AntigravityBridgeScript {
                 const body = mdRows.slice(1).map(r => '| ' + r.join(' | ') + ' |');
                 return '\n\n' + [header, sep, ...body].join('\n') + '\n\n';
               }
-              case 'span': {
-                // Separate pill/badge spans cleanly from adjacent words
-                if (cls.includes('rounded') || cls.includes('badge') || cls.includes('pill') || cls.includes('chip')) {
-                  const t = childrenMd.trim();
-                  return t ? (' ' + t + ' ') : '';
-                }
-                return childrenMd;
-              }
               default:
                 return childrenMd;
             }
@@ -298,8 +327,10 @@ object AntigravityBridgeScript {
 
           function normalizeMarkdown(md) {
             return (md || '')
+              .replace(/^\s*(?:You said|Agent said)\s*/i, '')
               .replace(/[ \t]{2,}/g, ' ')
               .replace(/ ([.,;:!?])/g, '$1')
+              .replace(/\(\s*,\s*(?:,\s*)*\)/g, '')
               .replace(/\n{3,}/g, '\n\n')
               .trim();
           }
@@ -323,54 +354,73 @@ object AntigravityBridgeScript {
           function extractReasoningBlocks(container, msgIndex) {
             const blocks = [];
             const seen = new Set();
-            const nodes = collectDeep(container, el => isReasoningElement(el), 30);
+            const nodes = Array.from(container.querySelectorAll('[data-testid="worked-for-collapsible"], details'));
             nodes.forEach((el, idx) => {
               if (seen.has(el)) return;
-              for (const prev of seen) {
-                if (prev.contains && prev.contains(el)) return;
-              }
               seen.add(el);
 
-              const summaryEl = el.querySelector('summary, [role="button"], button');
+              const summaryEl = el.querySelector('summary, button, [role="button"]');
               const rawSummary = summaryEl ? cleanText(summaryEl.textContent) : '';
               const durationMatch = rawSummary.match(/(\d+\s*(?:ms|s|sec|secs|seconds|m|min))/i);
               const duration = durationMatch ? durationMatch[1] : '';
               const title = rawSummary || 'Reasoning';
 
               const clone = el.cloneNode(true);
-              const cloneSummary = clone.querySelector('summary, [role="button"], button');
+              const cloneSummary = clone.querySelector('summary, button, [role="button"]');
               if (cloneSummary && cloneSummary.parentNode) {
                 cloneSummary.parentNode.removeChild(cloneSummary);
               }
               const body = normalizeMarkdown(nodeToMarkdown(clone, 0)) || cleanText(clone.textContent);
-              if (body || rawSummary) {
-                blocks.push({
-                  id: 'reason-' + msgIndex + '-' + idx,
-                  title: title,
-                  duration: duration,
-                  content: body || 'Tap to view reasoning details.',
-                  isStreaming: /thinking|reasoning\.\.\./i.test(rawSummary)
-                });
-              }
+              blocks.push({
+                id: 'reason-' + msgIndex + '-' + idx,
+                title: title,
+                duration: duration,
+                content: body || 'Reasoning steps completed.',
+                isStreaming: /thinking|working|reasoning\.\.\./i.test(rawSummary)
+              });
             });
             return blocks;
           }
 
           function extractArtifacts(container, msgIndex) {
             const artifacts = [];
-            const text = container.innerText || '';
-            const diffMatch = text.match(/(\d+\s+files?\s+changed)\s*\+(\d+)\s*[-−](\d+)/i);
-            if (diffMatch) {
-              artifacts.push({
-                id: 'diff-' + msgIndex,
-                title: diffMatch[1],
-                subtitle: 'Code changes ready for review',
-                actionLabel: 'Review',
-                url: '',
-                addedLines: parseInt(diffMatch[2], 10),
-                removedLines: parseInt(diffMatch[3], 10)
-              });
-            }
+            const artCards = Array.from(container.querySelectorAll('[data-testid="artifact-card"]'));
+            artCards.forEach((card, idx) => {
+              const header = card.querySelector('[data-testid="artifact-card-header"]');
+              const title = cleanText(header ? header.textContent : card.textContent).slice(0, 80);
+              const anchor = card.querySelector('a[href]');
+              const url = anchor ? (anchor.getAttribute('href') || '') : '';
+              const fullText = cleanText(card.textContent);
+              const subtitle = title ? fullText.replace(title, '').replace(/\bOpen\b/i, '').trim().slice(0, 120) : '';
+              if (title) {
+                artifacts.push({
+                  id: 'art-' + msgIndex + '-' + idx,
+                  title: title,
+                  subtitle: subtitle,
+                  actionLabel: 'Open',
+                  url: url,
+                  addedLines: null,
+                  removedLines: null
+                });
+              }
+            });
+
+            const diffCards = Array.from(container.querySelectorAll('[data-testid="changed-files-card"]'));
+            diffCards.forEach((card, idx) => {
+              const text = cleanText(card.textContent);
+              const diffMatch = text.match(/(\d+\s+files?\s+changed).*?\+(\d+)\s*[-−](\d+)/i);
+              if (diffMatch) {
+                artifacts.push({
+                  id: 'diff-' + msgIndex + '-' + idx,
+                  title: diffMatch[1],
+                  subtitle: 'Code changes ready for review',
+                  actionLabel: 'Review',
+                  url: '',
+                  addedLines: parseInt(diffMatch[2], 10),
+                  removedLines: parseInt(diffMatch[3], 10)
+                });
+              }
+            });
             return artifacts;
           }
 
@@ -413,7 +463,9 @@ object AntigravityBridgeScript {
             if (!el) return '';
             const aria = el.getAttribute('aria-label') || '';
             const m = aria.match(/current:\s*(.+)$/i);
-            return m && m[1] ? cleanText(m[1]) : cleanText(el.textContent);
+            const val = m && m[1] ? cleanText(m[1]) : cleanText(el.textContent);
+            if (/^no project$|^select project$/i.test(val)) return '';
+            return val;
           }
 
           function dismissOverlays() {
@@ -485,76 +537,49 @@ object AntigravityBridgeScript {
 
           function extractMessages() {
             const root = getAppRoot();
-            const sidebarList = root.querySelector('[data-testid="conversation-list-sidebar"]');
-            const sidebarVisible = sidebarList && isVisible(sidebarList) &&
-              sidebarList.getBoundingClientRect().width > window.innerWidth * 0.6;
-            if (sidebarVisible) {
+            const convView = root.querySelector('[data-testid="conversation-view"]');
+            if (!convView || !isVisible(convView)) {
               return [];
             }
 
-            let turns = collectDeep(root, el => {
-              if (sidebarList && sidebarList.contains(el)) return false;
-              const roleAttr = (el.getAttribute('data-message-author-role') || el.getAttribute('data-role') || el.getAttribute('data-author') || '').toLowerCase();
-              if (roleAttr === 'user' || roleAttr === 'assistant' || roleAttr === 'model' || roleAttr === 'agent') return true;
-              const testId = (el.getAttribute('data-testid') || '').toLowerCase();
-              if (testId.includes('message') || testId.includes('turn') || testId.includes('response')) {
-                return isVisible(el) && cleanText(el.textContent).length > 0;
-              }
-              return false;
-            }, 250);
-
-            if (turns.length === 0) {
-              turns = collectDeep(root, el => {
-                if (sidebarList && sidebarList.contains(el)) return false;
-                const tag = (el.tagName || '').toLowerCase();
-                const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
-                if (tag === 'article') return isVisible(el);
-                if ((cls.includes('message') || cls.includes('chat-turn') || cls.includes('response-container') || cls.includes('user-query') || cls.includes('prose') || cls.includes('markdown')) &&
-                    isVisible(el) && cleanText(el.textContent).length > 0) {
-                  return true;
-                }
-                return false;
-              }, 250);
-            }
-
-            const topTurns = turns.filter((el, idx) => {
-              for (let j = 0; j < turns.length; j++) {
-                if (idx !== j && turns[j].contains && turns[j].contains(el)) return false;
-              }
-              return true;
-            });
-
-            const inputBox = root.querySelector('[data-testid="agent-input-box"]');
+            const turnNodes = Array.from(
+              convView.querySelectorAll('[data-testid="user-message"], [data-testid="agent-response"]')
+            );
             const messages = [];
-            topTurns.forEach((el, idx) => {
-              if (inputBox && (el === inputBox || el.contains(inputBox) || inputBox.contains(el))) return;
 
-              const roleHint = (
-                (el.getAttribute('data-message-author-role') || '') + ' ' +
-                (el.getAttribute('data-role') || '') + ' ' +
-                (el.getAttribute('data-testid') || '') + ' ' +
-                (typeof el.className === 'string' ? el.className : '')
-              ).toLowerCase();
-
-              const isUser = /\b(user|human|prompt|query|request)\b/.test(roleHint) &&
-                !/\b(assistant|model|agent|response|reply)\b/.test(roleHint);
-
+            turnNodes.forEach((el, idx) => {
+              const tid = (el.getAttribute('data-testid') || '').toLowerCase();
+              const isUser = tid === 'user-message';
               const timestamp = extractMessageTimestamp(el);
-              const reasoning = isUser ? [] : extractReasoningBlocks(el, idx);
-              const artifacts = isUser ? [] : extractArtifacts(el, idx);
-              const markdown = normalizeMarkdown(nodeToMarkdown(el, 0));
 
-              if (!markdown && reasoning.length === 0 && artifacts.length === 0) return;
-
-              messages.push({
-                id: el.getAttribute('data-message-id') || el.id || ('msg-' + idx),
-                role: isUser ? 'user' : 'assistant',
-                markdown: markdown,
-                timestamp: timestamp,
-                reasoning: reasoning,
-                artifacts: artifacts,
-                isStreaming: false
-              });
+              if (isUser) {
+                const contentEl = el.querySelector('[data-testid="user-message-content"]') || el;
+                const md = normalizeMarkdown(nodeToMarkdown(contentEl, 0));
+                if (!md) return;
+                messages.push({
+                  id: el.id || ('user-' + idx + '-' + md.slice(0, 12)),
+                  role: 'user',
+                  markdown: md,
+                  timestamp: timestamp,
+                  reasoning: [],
+                  artifacts: [],
+                  isStreaming: false
+                });
+              } else {
+                const reasoning = extractReasoningBlocks(el, idx);
+                const artifacts = extractArtifacts(el, idx);
+                const md = normalizeMarkdown(nodeToMarkdown(el, 0));
+                if (!md && reasoning.length === 0 && artifacts.length === 0) return;
+                messages.push({
+                  id: el.id || ('agent-' + idx + '-' + md.slice(0, 12)),
+                  role: 'assistant',
+                  markdown: md,
+                  timestamp: timestamp,
+                  reasoning: reasoning,
+                  artifacts: artifacts,
+                  isStreaming: false
+                });
+              }
             });
 
             return messages;
@@ -614,25 +639,21 @@ object AntigravityBridgeScript {
             return items;
           }
 
-          function parseUsageDialog(dialog) {
-            if (!dialog) return null;
-            // NEVER scrape the model selector panel as usage data!
-            if (dialog.querySelector('[data-testid="model-selector-panel"]') ||
-                dialog.querySelector('[data-testid="model-selector-effort-group"]') ||
-                dialog.querySelector('[data-testid="conversation-list-sidebar"]')) {
-              return null;
-            }
-            const rawLines = (dialog.innerText || '')
+          function parseUsagePane(pane) {
+            if (!pane) return null;
+            const rawLines = (pane.innerText || '')
               .split('\n')
               .map(cleanText)
-              .filter(line => line.length > 0 && !/^view usage$/i.test(line));
+              .filter(l => l.length > 0 && !/^(back|view usage|usage|quota|model)$/i.test(l));
             if (rawLines.length === 0) return null;
 
             const joined = rawLines.join(' • ');
-            if (/gemini 4 neon.*gemini 4 carbon/i.test(joined)) return null;
+            if (/gemini 4 neon.*gemini 4 carbon/i.test(joined) || /thinking effort/i.test(joined)) {
+              return null;
+            }
 
             let usedPct = null;
-            const pb = dialog.querySelector('[role="progressbar"], meter');
+            const pb = pane.querySelector('[role="progressbar"], meter');
             if (pb) {
               const now = parseFloat(pb.getAttribute('aria-valuenow') || pb.value || '');
               const max = parseFloat(pb.getAttribute('aria-valuemax') || pb.max || '100');
@@ -643,13 +664,15 @@ object AntigravityBridgeScript {
               if (pctMatch) usedPct = parseFloat(pctMatch[1]);
             }
 
-            const resetLine = rawLines.find(l => /resets?\s+in|resets?\s+at|resets?\s+on/i.test(l)) || '';
-            const statusLine = rawLines.find(l => l !== resetLine && /(remaining|used|quota|limit|available|credits|%)/i.test(l)) || rawLines[0] || '';
+            const resetLine = rawLines.find(l => /resets?\s+(?:in|at|on)/i.test(l)) || '';
+            const statusLine = rawLines.find(l => l !== resetLine && /(\d+\s*%|remaining|used|quota|limit|available|credits)/i.test(l))
+              || rawLines.find(l => l !== resetLine)
+              || '';
             const planLine = rawLines.find(l => /(ultra|pro|standard|free|enterprise|workspace|plan)/i.test(l) && l.length < 36) || 'Antigravity';
 
             return {
               usedPercent: usedPct,
-              remainingLabel: statusLine.slice(0, 64),
+              remainingLabel: statusLine.slice(0, 72),
               resetLabel: resetLine.slice(0, 48),
               planLabel: planLine,
               rawSummary: statusLine.slice(0, 96),
@@ -687,6 +710,7 @@ object AntigravityBridgeScript {
 
           function buildSnapshot() {
             const authRequired = detectAuthRequired();
+            const root = getAppRoot();
             const composer = findComposerInput();
             const modelBtn = findModelSelectorButton();
             const activeModel = parseActiveModelName(modelBtn);
@@ -699,15 +723,11 @@ object AntigravityBridgeScript {
             }
             const conversations = authRequired ? [] : extractConversations();
 
+            // Exact conversation title from [data-testid="breadcrumb-segment"] when inside a thread!
+            const breadcrumbEl = root.querySelector('[data-testid="breadcrumb-segment"]');
+            const breadcrumbTitle = breadcrumbEl ? cleanText(breadcrumbEl.textContent) : '';
             const activeConv = conversations.find(c => c.isActive);
-            let title = activeConv ? activeConv.title : 'Antigravity';
-            if (!activeConv) {
-              const headerHeading = getAppRoot().querySelector('header h1, header [role="heading"]');
-              const rawHeader = headerHeading ? cleanText(headerHeading.textContent) : '';
-              if (rawHeader && !/google antigravity|remote conversations/i.test(rawHeader)) {
-                title = rawHeader;
-              }
-            }
+            const title = breadcrumbTitle || (activeConv ? activeConv.title : '') || 'Antigravity';
 
             if (activeModel && cachedModels.length > 0) {
               cachedModels = cachedModels.map(m => {
@@ -762,8 +782,8 @@ object AntigravityBridgeScript {
 
           function scheduleSync() {
             if (isInternalModalProbe) return;
-            if (syncTimer) return; // Leading-edge throttle to prevent main-thread flood during scroll
-            const delay = detectStreaming() ? 360 : 900;
+            if (syncTimer) return;
+            const delay = detectStreaming() ? 380 : 950;
             syncTimer = setTimeout(() => {
               syncTimer = null;
               syncNow(false);
@@ -771,21 +791,35 @@ object AntigravityBridgeScript {
           }
 
           async function sendPrompt(text) {
-            const input = findComposerInput();
-            if (!input || !text) return false;
-
-            const tag = (input.tagName || '').toLowerCase();
-            if (tag === 'textarea' || tag === 'input') {
-              const proto = tag === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-              const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-              if (desc && desc.set) desc.set.call(input, text);
-              else input.value = text;
-              input.dispatchEvent(new Event('input', { bubbles: true }));
-              input.dispatchEvent(new Event('change', { bubbles: true }));
-            } else {
-              // Lexical / ProseMirror contenteditable injection
-              try { input.focus(); } catch (_) {}
+            const report = (ok, reason) => {
               try {
+                if (window.AntigravityNative && window.AntigravityNative.onPromptSendResult) {
+                  window.AntigravityNative.onPromptSendResult(!!ok, reason || '');
+                }
+              } catch (_) {}
+            };
+
+            const input = findComposerInput();
+            if (!input || !text) {
+              report(false, 'composer not found');
+              return false;
+            }
+
+            try {
+              simulateTap(input);
+              input.focus();
+              await sleep(60);
+
+              const tag = (input.tagName || '').toLowerCase();
+              if (tag === 'textarea' || tag === 'input') {
+                const proto = tag === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                if (desc && desc.set) desc.set.call(input, text);
+                else input.value = text;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+              } else {
+                // Place real DOM selection inside Lexical/ProseMirror contenteditable editor
                 const range = document.createRange();
                 range.selectNodeContents(input);
                 const sel = window.getSelection();
@@ -793,68 +827,76 @@ object AntigravityBridgeScript {
                   sel.removeAllRanges();
                   sel.addRange(range);
                 }
-              } catch (_) {}
 
-              // Method 1: Synthetic ClipboardEvent('paste') — handled natively by Lexical/ProseMirror
-              let inserted = false;
-              try {
-                const dt = new DataTransfer();
-                dt.setData('text/plain', text);
-                const pasteEvent = new ClipboardEvent('paste', {
-                  bubbles: true,
-                  cancelable: true,
-                  clipboardData: dt
-                });
-                input.dispatchEvent(pasteEvent);
-                await sleep(50);
-                if (cleanText(input.textContent).includes(text.slice(0, Math.min(text.length, 16)))) {
-                  inserted = true;
-                }
-              } catch (_) {}
-
-              // Method 2: InputEvent beforeinput + execCommand('insertText')
-              if (!inserted) {
+                // 1. execCommand('insertText') with focused WebView (works cleanly on Lexical/ProseMirror!)
+                let inserted = false;
                 try {
+                  document.execCommand('selectAll', false, null);
+                  document.execCommand('insertText', false, text);
+                  await sleep(60);
+                  if (cleanText(input.textContent).length > 0) inserted = true;
+                } catch (_) {}
+
+                // 2. ClipboardEvent('paste') fallback
+                if (!inserted) {
+                  try {
+                    const dt = new DataTransfer();
+                    dt.setData('text/plain', text);
+                    input.dispatchEvent(new ClipboardEvent('paste', {
+                      bubbles: true,
+                      cancelable: true,
+                      clipboardData: dt
+                    }));
+                    await sleep(60);
+                    if (cleanText(input.textContent).length > 0) inserted = true;
+                  } catch (_) {}
+                }
+
+                // 3. InputEvent('beforeinput') + InputEvent('input') fallback
+                if (!inserted) {
                   input.dispatchEvent(new InputEvent('beforeinput', {
                     bubbles: true,
                     cancelable: true,
                     inputType: 'insertText',
                     data: text
                   }));
-                  document.execCommand('insertText', false, text);
                   input.dispatchEvent(new InputEvent('input', {
                     bubbles: true,
                     inputType: 'insertText',
                     data: text
                   }));
-                  await sleep(50);
-                  if (cleanText(input.textContent).length > 0) inserted = true;
-                } catch (_) {}
+                  await sleep(60);
+                }
               }
 
-              // Method 3: Direct paragraph fallback
-              if (!inserted) {
-                input.textContent = text;
-                input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+              // Wait for [data-testid="send-button"] to become enabled
+              const sendBtn = await waitFor(() => {
+                const btn = getAppRoot().querySelector('[data-testid="send-button"], button[aria-label="Send message"]');
+                return (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' && isVisible(btn)) ? btn : null;
+              }, 800, 45);
+
+              if (sendBtn) {
+                simulateTap(sendBtn);
+                await sleep(160);
+                const stillHasText = cleanText(input.textContent || input.value || '') === cleanText(text);
+                if (stillHasText) {
+                  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+                }
+                report(true, 'sent');
+              } else {
+                input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+                await sleep(180);
+                const cleared = cleanText(input.textContent || input.value || '').length === 0;
+                report(cleared, cleared ? 'sent via enter' : 'send button stayed disabled');
               }
+
+              setTimeout(() => syncNow(true), 350);
+              setTimeout(() => syncNow(true), 1200);
+              return true;
+            } catch (err) {
+              report(false, String(err));
+              return false;
             }
-
-            // Wait for [data-testid="send-button"] to become enabled
-            const sendBtn = await waitFor(() => {
-              const btn = getAppRoot().querySelector('[data-testid="send-button"], button[aria-label="Send message"]');
-              return (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' && isVisible(btn)) ? btn : null;
-            }, 600, 50);
-
-            if (sendBtn) {
-              simulateTap(sendBtn);
-            } else {
-              input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-              input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-            }
-
-            setTimeout(() => syncNow(true), 350);
-            setTimeout(() => syncNow(true), 1100);
-            return true;
           }
 
           function stopGeneration() {
@@ -899,7 +941,6 @@ object AntigravityBridgeScript {
           async function selectModel(modelName, effortTier) {
             const btn = findModelSelectorButton();
             if (!btn) return false;
-            // Wait if a background probe is finishing
             if (isInternalModalProbe) {
               await waitFor(() => !isInternalModalProbe, 1200, 40);
             }
@@ -913,7 +954,6 @@ object AntigravityBridgeScript {
 
               const targetLower = (modelName || '').toLowerCase().trim();
 
-              // 1. Direct single-step model (e.g., GPT-OSS 120B)
               const directItems = Array.from(panel.querySelectorAll('button[data-testid="model-selector-item"]'));
               const directMatch = directItems.find(b => cleanText(b.textContent).toLowerCase().includes(targetLower));
               if (directMatch) {
@@ -922,7 +962,6 @@ object AntigravityBridgeScript {
                 return true;
               }
 
-              // 2. Two-step effort-group model (e.g., Gemini 4 Argon -> Medium/High/Extra)
               const groupSpans = Array.from(panel.querySelectorAll('[data-testid="model-selector-effort-group"]'));
               const groupMatch = groupSpans.find(s => cleanText(s.textContent).toLowerCase() === targetLower) ||
                 groupSpans.find(s => cleanText(s.textContent).toLowerCase().includes(targetLower));
@@ -932,10 +971,8 @@ object AntigravityBridgeScript {
                 return false;
               }
 
-              const groupBtn = groupMatch.closest('button') || groupMatch;
-              simulateTap(groupBtn);
+              simulateTap(groupMatch.closest('button') || groupMatch);
 
-              // 3. Wait for the effort sub-panel options to become visible & interactive
               const optionSpans = await waitFor(() => {
                 const opts = Array.from(document.querySelectorAll('[data-testid="model-selector-effort-option"]'))
                   .filter(isVisible);
@@ -990,21 +1027,32 @@ object AntigravityBridgeScript {
 
               simulateTap(usageBtn);
 
-              // Wait for a Usage dialog that is NOT the model-selector-panel
-              const usageDialog = await waitFor(() => {
+              // Look inside the sibling slide-pane of [data-testid="model-selector-panel"] OR any new dialog!
+              const usagePane = await waitFor(() => {
+                const slideContainer = panel.parentElement;
+                if (slideContainer) {
+                  const siblings = Array.from(slideContainer.children).filter(ch => ch !== panel);
+                  for (const sib of siblings) {
+                    const txt = cleanText(sib.innerText);
+                    if (txt.length > 4 && !/thinking effort/i.test(txt) &&
+                        /(%|resets?\s+in|quota|usage|remaining|limit)/i.test(txt)) {
+                      return sib;
+                    }
+                  }
+                }
                 const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-testid="bottom-sheet"]'))
                   .filter(isVisible);
                 for (let i = dialogs.length - 1; i >= 0; i--) {
-                  if (!dialogs[i].querySelector('[data-testid="model-selector-panel"]') &&
-                      !dialogs[i].querySelector('[data-testid="model-selector-effort-group"]')) {
-                    return dialogs[i];
+                  if (!dialogs[i].querySelector('[data-testid="model-selector-panel"]')) {
+                    const txt = cleanText(dialogs[i].innerText);
+                    if (txt.length > 4) return dialogs[i];
                   }
                 }
                 return null;
               }, 1600, 60);
 
-              if (usageDialog) {
-                const parsed = parseUsageDialog(usageDialog);
+              if (usagePane) {
+                const parsed = parseUsagePane(usagePane);
                 if (parsed) cachedQuota = parsed;
               }
               dismissOverlays();
@@ -1024,21 +1072,14 @@ object AntigravityBridgeScript {
               setTimeout(() => syncNow(true), 350);
               return true;
             }
+            const backBtn = root.querySelector('[data-testid="mobile-back-to-home"]');
+            if (backBtn && isVisible(backBtn)) {
+              simulateTap(backBtn);
+              setTimeout(() => syncNow(true), 350);
+              return true;
+            }
             window.location.href = 'https://antigravity.google.com/remote';
             return true;
-          }
-
-          function findMobileBackButton() {
-            const root = getAppRoot();
-            const byAria = root.querySelector('button[aria-label*="back" i], button[aria-label*="conversations" i], button[aria-label*="sidebar" i]');
-            if (byAria && isVisible(byAria)) return byAria;
-            // Fallback: top-leftmost compact icon button inside mobile-layout
-            const topBtns = Array.from(root.querySelectorAll('button')).filter(b => {
-              if (!isVisible(b)) return false;
-              const r = b.getBoundingClientRect();
-              return r.top >= 0 && r.top < 110 && r.left >= 0 && r.left < 64 && r.width <= 56 && r.height <= 56;
-            });
-            return topBtns[0] || null;
           }
 
           function clickSidebarRow(url, title) {
@@ -1069,12 +1110,13 @@ object AntigravityBridgeScript {
           async function selectConversation(url, title) {
             if (clickSidebarRow(url, title)) return true;
 
-            const backBtn = findMobileBackButton();
-            if (backBtn) {
+            // Exact mobile back-to-home button discovered from thread DOM snapshot!
+            const backBtn = getAppRoot().querySelector('[data-testid="mobile-back-to-home"], button[aria-label="Back to home"]');
+            if (backBtn && isVisible(backBtn)) {
               simulateTap(backBtn);
               const rowsReady = await waitFor(
                 () => getAppRoot().querySelectorAll('[data-testid="conversation-row-sidebar"]').length > 0,
-                1600,
+                1800,
                 50
               );
               if (rowsReady && clickSidebarRow(url, title)) {
@@ -1178,7 +1220,6 @@ object AntigravityBridgeScript {
             });
           }
 
-          // Observe ONLY structural/text changes (no `attributes: true`) to keep 60fps UI
           const observer = new MutationObserver(scheduleSync);
           if (document.body) {
             observer.observe(document.body, { childList: true, subtree: true, characterData: true });

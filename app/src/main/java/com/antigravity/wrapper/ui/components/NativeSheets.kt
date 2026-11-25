@@ -149,22 +149,27 @@ fun ModelSelectorSheet(
                     )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
+                    TextButton(
                         onClick = onRefreshModels,
                         enabled = !isRefreshing
                     ) {
                         if (isRefreshing) {
                             CircularProgressIndicator(
                                 strokeWidth = 2.dp,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(14.dp)
                             )
                         } else {
                             Icon(
                                 imageVector = Icons.Rounded.Refresh,
-                                contentDescription = "Refresh models",
-                                modifier = Modifier.size(20.dp)
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (isRefreshing) "Syncing" else "Sync models",
+                            style = MaterialTheme.typography.labelMedium
+                        )
                     }
                     IconButton(onClick = onDismiss) {
                         Icon(
@@ -178,7 +183,7 @@ fun ModelSelectorSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Thinking effort selector — tapping a chip updates effort immediately if current model supports it
+            // Thinking effort selector — applies immediately to the active effort-group model
             Text(
                 text = "THINKING EFFORT",
                 style = MaterialTheme.typography.labelSmall,
@@ -234,7 +239,7 @@ fun ModelSelectorSheet(
                             Spacer(modifier = Modifier.width(10.dp))
                         }
                         Text(
-                            text = if (isRefreshing) "Loading models…" else "Tap refresh to load models",
+                            text = if (isRefreshing) "Loading models…" else "Tap Sync models to fetch available models",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -250,10 +255,11 @@ fun ModelSelectorSheet(
                     models.forEach { model ->
                         val selected = model.isSelected ||
                             activeModelLabel.startsWith(model.name, ignoreCase = true)
-                        val tierLabel = if (model.hasEffortLevels) {
-                            if (selected) selectedEffort else model.tier.ifBlank { selectedEffort }
-                        } else {
-                            model.tier
+                        // Avoid conflicting static Medium badges on unselected effort-group rows
+                        val tierLabel = when {
+                            selected && model.hasEffortLevels -> selectedEffort
+                            !model.hasEffortLevels && model.tier.isNotBlank() -> model.tier
+                            else -> ""
                         }
                         Surface(
                             onClick = {
@@ -430,7 +436,7 @@ fun UsageQuotaSheet(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Compact Quota Gauge Card (56dp ring so text has plenty of breathing room)
+            // Compact Quota Card — show ring only when a live percentage is available
             Surface(
                 shape = RoundedCornerShape(18.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -442,37 +448,58 @@ fun UsageQuotaSheet(
                         .padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier.size(56.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        val pct = quota.usedPercent ?: 0f
-                        Canvas(modifier = Modifier.size(52.dp)) {
-                            drawArc(
-                                color = trackColor,
-                                startAngle = 0f,
-                                sweepAngle = 360f,
-                                useCenter = false,
-                                style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
-                            )
-                            if (quota.usedPercent != null) {
+                    if (quota.usedPercent != null) {
+                        Box(
+                            modifier = Modifier.size(56.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Canvas(modifier = Modifier.size(52.dp)) {
+                                drawArc(
+                                    color = trackColor,
+                                    startAngle = 0f,
+                                    sweepAngle = 360f,
+                                    useCenter = false,
+                                    style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
+                                )
                                 drawArc(
                                     color = primaryColor,
                                     startAngle = -90f,
-                                    sweepAngle = (pct / 100f).coerceIn(0.03f, 1f) * 360f,
+                                    sweepAngle = (quota.usedPercent / 100f).coerceIn(0.03f, 1f) * 360f,
                                     useCenter = false,
                                     style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
                                 )
                             }
+                            Text(
+                                text = "${quota.usedPercent.toInt()}%",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
                         }
-                        Text(
-                            text = quota.usedPercent?.let { "${it.toInt()}%" } ?: "—",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primaryContainer),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isRefreshing) {
+                                CircularProgressIndicator(
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.BarChart,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
                     }
 
-                    Spacer(modifier = Modifier.width(16.dp))
+                    Spacer(modifier = Modifier.width(14.dp))
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
@@ -487,7 +514,7 @@ fun UsageQuotaSheet(
                             text = when {
                                 isRefreshing -> "Checking live quota…"
                                 quota.remainingLabel.isNotBlank() -> quota.remainingLabel
-                                else -> "Usage summary unavailable for current view"
+                                else -> "Tap Refresh above to sync usage stats"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -825,29 +852,25 @@ fun SettingsFullScreen(
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Message text scale",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "${sliderScale.roundToInt()}%",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    Slider(
-                        value = sliderScale,
-                        onValueChange = { sliderScale = (it / 5f).roundToInt() * 5f },
-                        onValueChangeFinished = { onFontScaleChange(sliderScale.roundToInt()) },
-                        valueRange = 85f..135f
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Message text size",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val scalePresets = listOf(90 to "Small", 100 to "Default", 115 to "Large", 130 to "XL")
+                    val closestPreset = scalePresets.minByOrNull { kotlin.math.abs(it.first - settings.fontScalePercent) }?.first ?: 100
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        scalePresets.forEachIndexed { idx, (pct, label) ->
+                            SegmentedButton(
+                                selected = closestPreset == pct,
+                                onClick = { onFontScaleChange(pct) },
+                                shape = SegmentedButtonDefaults.itemShape(idx, scalePresets.size),
+                                label = { Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1) }
+                            )
+                        }
+                    }
                 }
             }
 
@@ -857,27 +880,27 @@ fun SettingsFullScreen(
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Column(modifier = Modifier.padding(16.dp)) {
                     Text(
                         text = "Experience",
                         style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(vertical = 4.dp)
+                        color = MaterialTheme.colorScheme.primary
                     )
+                    Spacer(modifier = Modifier.height(6.dp))
                     SheetSwitchRow(
                         icon = Icons.Rounded.Psychology,
                         title = "Auto-expand reasoning blocks",
                         checked = settings.autoExpandReasoning,
                         onCheckedChange = onAutoExpandReasoningChange
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
                     SheetSwitchRow(
                         icon = Icons.Rounded.Vibration,
                         title = "Haptic feedback",
                         checked = settings.hapticFeedbackEnabled,
                         onCheckedChange = onHapticFeedbackChange
                     )
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
                     SheetSwitchRow(
                         icon = Icons.Rounded.ScreenLockPortrait,
                         title = "Keep screen awake while generating",

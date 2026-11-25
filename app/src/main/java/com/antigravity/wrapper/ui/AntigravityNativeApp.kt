@@ -129,9 +129,10 @@ fun AntigravityNativeApp(
         if (textToSend.isEmpty()) return
         triggerHaptic()
         viewModel.addOptimisticUserMessage(textToSend)
-        bridgeEngine.sendPrompt(textToSend) { dispatched ->
+        bridgeEngine.sendPrompt(textToSend) { dispatched, reason ->
             if (!dispatched) {
-                showToast("Session input not ready yet")
+                val detail = if (reason.isNotBlank()) " ($reason)" else ""
+                showToast("Couldn't send message$detail")
             }
         }
     }
@@ -155,18 +156,16 @@ fun AntigravityNativeApp(
     val displayedMessages = uiState.displayedMessages
     val currentUrl = uiState.snapshot.currentUrl
 
-    // Jump straight to latest message when opening a conversation or receiving a new message
+    // Scroll straight to the bottom anchor item so threads always open at the latest message
     LaunchedEffect(currentUrl, displayedMessages.size) {
         if (displayedMessages.isNotEmpty()) {
-            listState.scrollToItem(displayedMessages.lastIndex)
+            listState.scrollToItem(displayedMessages.size)
         }
     }
 
     val showScrollToBottom by remember {
         derivedStateOf {
-            val total = listState.layoutInfo.totalItemsCount
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            total > 1 && lastVisible < total - 1
+            displayedMessages.isNotEmpty() && listState.canScrollForward
         }
     }
 
@@ -353,7 +352,11 @@ fun AntigravityNativeApp(
                             bottomBar = {
                                 PromptComposerBar(
                                     text = uiState.composerText,
-                                    activeModelLabel = uiState.activeModelLabel,
+                                    activeModelLabel = if (uiState.isSwitchingConversation) {
+                                        "Syncing…"
+                                    } else {
+                                        uiState.activeModelLabel
+                                    },
                                     isStreaming = uiState.snapshot.isStreaming,
                                     isConnected = uiState.bridgeStatus == BridgeStatus.CONNECTED,
                                     onTextChange = { viewModel.updateComposerText(it) },
@@ -369,7 +372,6 @@ fun AntigravityNativeApp(
                                     onOpenModelSelector = {
                                         triggerHaptic()
                                         viewModel.setModelSheetOpen(true)
-                                        // Only trigger a background refresh if models aren't cached yet
                                         if (uiState.snapshot.models.size <= 1) {
                                             viewModel.onStartModelRefresh()
                                             bridgeEngine.refreshModels()
@@ -410,7 +412,7 @@ fun AntigravityNativeApp(
                                 } else {
                                     LazyColumn(
                                         state = listState,
-                                        contentPadding = PaddingValues(top = 8.dp, bottom = 20.dp),
+                                        contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp),
                                         verticalArrangement = Arrangement.spacedBy(10.dp),
                                         modifier = Modifier.fillMaxSize()
                                     ) {
@@ -438,9 +440,12 @@ fun AntigravityNativeApp(
                                                 }
                                             )
                                         }
+                                        item(key = "bottom_anchor") {
+                                            Spacer(modifier = Modifier.size(4.dp))
+                                        }
                                     }
 
-                                    // Floating Scroll-to-Bottom button when scrolled up in a long thread
+                                    // Floating Scroll-to-Bottom button whenever any content sits below viewport
                                     androidx.compose.animation.AnimatedVisibility(
                                         visible = showScrollToBottom,
                                         enter = fadeIn(),
@@ -453,13 +458,11 @@ fun AntigravityNativeApp(
                                             onClick = {
                                                 triggerHaptic()
                                                 scope.launch {
-                                                    if (displayedMessages.isNotEmpty()) {
-                                                        listState.animateScrollToItem(displayedMessages.lastIndex)
-                                                    }
+                                                    listState.animateScrollToItem(displayedMessages.size)
                                                 }
                                             },
                                             shape = CircleShape,
-                                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                                             contentColor = MaterialTheme.colorScheme.onSurface
                                         ) {
                                             Icon(
@@ -470,12 +473,21 @@ fun AntigravityNativeApp(
                                     }
                                 }
 
-                                // Positioned cleanly inside content area so it ALWAYS clears above the composer bar
+                                // Dark-themed Snackbar positioned cleanly above the composer bar
                                 SnackbarHost(
                                     hostState = snackbarHostState,
                                     modifier = Modifier
                                         .align(Alignment.BottomCenter)
-                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    snackbar = { data ->
+                                        androidx.compose.material3.Snackbar(
+                                            snackbarData = data,
+                                            shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                            contentColor = MaterialTheme.colorScheme.onSurface,
+                                            actionColor = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 )
                             }
                         }
@@ -542,54 +554,59 @@ fun AntigravityNativeApp(
                 }
             }
 
-            // LAYER 2: Full-Screen Native Settings Page
+            // LAYER 2: Full-Screen Native Settings Page — pure opaque slide (zero transparent bleed)
             AnimatedVisibility(
                 visible = uiState.isSettingsSheetOpen && !showWebOverlay,
-                enter = slideInHorizontally { it } + fadeIn(),
-                exit = slideOutHorizontally { it } + fadeOut(),
+                enter = slideInHorizontally { it },
+                exit = slideOutHorizontally { it },
                 modifier = Modifier
                     .fillMaxSize()
                     .zIndex(2f)
             ) {
-                SettingsFullScreen(
-                    settings = settings,
-                    bridgeStatus = uiState.bridgeStatus,
-                    diagnosticsNote = uiState.snapshot.diagnosticsNote,
-                    onThemeModeChange = {
-                        triggerHaptic()
-                        viewModel.updateThemeMode(it)
-                    },
-                    onDynamicColorChange = {
-                        triggerHaptic()
-                        viewModel.setDynamicColor(it)
-                    },
-                    onFontScaleChange = { viewModel.setFontScale(it) },
-                    onAutoExpandReasoningChange = {
-                        triggerHaptic()
-                        viewModel.setAutoExpandReasoning(it)
-                    },
-                    onHapticFeedbackChange = { viewModel.setHapticFeedback(it) },
-                    onKeepScreenAwakeChange = {
-                        triggerHaptic()
-                        viewModel.setKeepScreenAwake(it)
-                    },
-                    onWebInspectorChange = {
-                        triggerHaptic()
-                        viewModel.setWebInspectorMode(it)
-                    },
-                    onCopyDomSnapshot = {
-                        triggerHaptic()
-                        viewModel.setSettingsSheetOpen(false)
-                        copyDomSnapshot()
-                    },
-                    onSignOut = {
-                        triggerHaptic()
-                        viewModel.clearOptimisticMessages()
-                        viewModel.onBridgeNavigatingToAuth()
-                        bridgeEngine.signOutAndReload()
-                    },
-                    onBack = { viewModel.setSettingsSheetOpen(false) }
-                )
+                Surface(
+                    color = MaterialTheme.colorScheme.background,
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    SettingsFullScreen(
+                        settings = settings,
+                        bridgeStatus = uiState.bridgeStatus,
+                        diagnosticsNote = uiState.snapshot.diagnosticsNote,
+                        onThemeModeChange = {
+                            triggerHaptic()
+                            viewModel.updateThemeMode(it)
+                        },
+                        onDynamicColorChange = {
+                            triggerHaptic()
+                            viewModel.setDynamicColor(it)
+                        },
+                        onFontScaleChange = { viewModel.setFontScale(it) },
+                        onAutoExpandReasoningChange = {
+                            triggerHaptic()
+                            viewModel.setAutoExpandReasoning(it)
+                        },
+                        onHapticFeedbackChange = { viewModel.setHapticFeedback(it) },
+                        onKeepScreenAwakeChange = {
+                            triggerHaptic()
+                            viewModel.setKeepScreenAwake(it)
+                        },
+                        onWebInspectorChange = {
+                            triggerHaptic()
+                            viewModel.setWebInspectorMode(it)
+                        },
+                        onCopyDomSnapshot = {
+                            triggerHaptic()
+                            viewModel.setSettingsSheetOpen(false)
+                            copyDomSnapshot()
+                        },
+                        onSignOut = {
+                            triggerHaptic()
+                            viewModel.clearOptimisticMessages()
+                            viewModel.onBridgeNavigatingToAuth()
+                            bridgeEngine.signOutAndReload()
+                        },
+                        onBack = { viewModel.setSettingsSheetOpen(false) }
+                    )
+                }
             }
         }
     }
