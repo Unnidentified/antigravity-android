@@ -3,8 +3,12 @@ package com.antigravity.wrapper.bridge
 import android.annotation.SuppressLint
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebSettings
@@ -21,9 +25,13 @@ import com.antigravity.wrapper.web.UserAgentSanitizer
 import java.util.concurrent.Executors
 
 /**
- * Controller for the invisible/headless Antigravity WebView session.
- * Parses incoming bridge JSON off the main thread to eliminate scroll/drawer frame drops,
- * and strictly isolates focus/touch whenever hidden behind the native Compose UI.
+ * Controller for the headless Antigravity WebView session.
+ * - Keeps `alpha = 1f` behind the opaque Compose root Surface so Chromium never throttles
+ *   `BeginMainFrame`, React 18 commits, or streaming responses.
+ * - Parses bridge JSON on a background executor with deduplication to keep 60fps scrolling.
+ * - Uses trusted Android `MotionEvent`, `InputConnection.commitText`, and `KeyEvent.KEYCODE_ENTER`
+ *   during prompt submission so Lexical/ProseMirror always updates its internal editor state cleanly,
+ *   then immediately re-locks hidden WebView focus.
  */
 class AntigravityBridgeEngine(
     private val onSnapshotReceived: (BridgeSnapshot) -> Unit,
@@ -33,6 +41,10 @@ class AntigravityBridgeEngine(
     private val parserExecutor = Executors.newSingleThreadExecutor()
     private var webView: WebView? = null
     private var interactiveMode: Boolean = false
+    private var allowProgrammaticTouch: Boolean = false
+    private var pendingSendCallback: ((Boolean, String) -> Unit)? = null
+    private var sendUnlockGuard: Runnable? = null
+
     @Volatile
     private var lastDeliveredSnapshot: BridgeSnapshot? = null
 
@@ -77,7 +89,9 @@ class AntigravityBridgeEngine(
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(view, true)
 
-        view.setOnTouchListener { _, _ -> !interactiveMode }
+        // Keep alpha=1f so Chromium's compositor stays active behind our opaque native Surface
+        view.alpha = 1f
+        view.setOnTouchListener { _, _ -> !interactiveMode && !allowProgrammaticTouch }
         setInteractive(false)
 
         view.addJavascriptInterface(NativeJsBridge(), "AntigravityNative")
@@ -94,7 +108,6 @@ class AntigravityBridgeEngine(
         view.isFocusable = interactive
         view.isFocusableInTouchMode = interactive
         view.isClickable = interactive
-        view.alpha = if (interactive) 1f else 0f
         view.importantForAccessibility = if (interactive) {
             View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
         } else {
@@ -110,6 +123,39 @@ class AntigravityBridgeEngine(
         }
     }
 
+    private fun restoreFocusLock() {
+        sendUnlockGuard?.let { mainHandler.removeCallbacks(it) }
+        sendUnlockGuard = null
+        allowProgrammaticTouch = false
+        val view = webView ?: return
+        if (!interactiveMode) {
+            view.clearFocus()
+            view.isFocusable = false
+            view.isFocusableInTouchMode = false
+            view.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        }
+    }
+
+    private fun performTrustedTap(normX: Float, normY: Float) {
+        val view = webView ?: return
+        if (view.width <= 0 || view.height <= 0) return
+        val px = (normX.coerceIn(0.01f, 0.99f) * view.width)
+        val py = (normY.coerceIn(0.01f, 0.99f) * view.height)
+        val downTime = SystemClock.uptimeMillis()
+        val down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, px, py, 0)
+        val up = MotionEvent.obtain(downTime, downTime + 25L, MotionEvent.ACTION_UP, px, py, 0)
+        val prevAllow = allowProgrammaticTouch
+        allowProgrammaticTouch = true
+        try {
+            view.dispatchTouchEvent(down)
+            view.dispatchTouchEvent(up)
+        } finally {
+            allowProgrammaticTouch = prevAllow
+            down.recycle()
+            up.recycle()
+        }
+    }
+
     fun injectBridgeScript() {
         webView?.evaluateJavascript(AntigravityBridgeScript.buildBootstrapScript(), null)
     }
@@ -121,8 +167,6 @@ class AntigravityBridgeEngine(
         )
     }
 
-    private var pendingSendCallback: ((Boolean, String) -> Unit)? = null
-
     fun sendPrompt(text: String, onResult: (Boolean, String) -> Unit) {
         val view = webView
         if (view == null) {
@@ -131,36 +175,45 @@ class AntigravityBridgeEngine(
         }
         pendingSendCallback = onResult
 
-        // Temporarily allow Chromium DOM focus (while keeping WebView invisible & untouchable)
-        // so Lexical/ProseMirror's contenteditable editor accepts selection + insertText/paste.
-        val wasInteractive = interactiveMode
-        if (!wasInteractive) {
+        // Briefly unlock DOM focus so Chromium's InputConnection + Lexical accept trusted input
+        if (!interactiveMode) {
             view.isFocusable = true
             view.isFocusableInTouchMode = true
             view.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
             view.requestFocus()
         }
 
-        val escaped = AntigravityBridgeScript.escapeJsString(text)
+        // Step 1: Focus the Lexical/ProseMirror contenteditable input in DOM (with trusted tap)
         view.evaluateJavascript(
-            "window.__agBridge ? window.__agBridge.sendPrompt(\"$escaped\") : false;",
-            null
-        )
+            "window.__agBridge ? window.__agBridge.focusComposer() : false;"
+        ) { _ ->
+            // Step 2: Commit text via genuine trusted Android InputConnection, then run JS verification & submit
+            mainHandler.postDelayed({
+                try {
+                    val ic = view.onCreateInputConnection(EditorInfo())
+                    ic?.commitText(text, 1)
+                } catch (_: Exception) {
+                    // JS fallback will handle insertion if InputConnection is unavailable
+                }
 
-        // Safety timeout to always restore focus lock cleanly
-        mainHandler.postDelayed({
-            if (!interactiveMode) {
-                view.clearFocus()
-                view.isFocusable = false
-                view.isFocusableInTouchMode = false
-                view.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
-            }
+                val escaped = AntigravityBridgeScript.escapeJsString(text)
+                view.evaluateJavascript(
+                    "window.__agBridge ? window.__agBridge.submitPromptAfterCommit(\"$escaped\") : false;",
+                    null
+                )
+            }, 130L)
+        }
+
+        // Safety timeout to always restore focus lock
+        sendUnlockGuard?.let { mainHandler.removeCallbacks(it) }
+        val guard = Runnable {
+            restoreFocusLock()
             val cb = pendingSendCallback
             pendingSendCallback = null
-            if (cb != null) {
-                cb(true, "")
-            }
-        }, 1_100L)
+            cb?.invoke(true, "")
+        }
+        sendUnlockGuard = guard
+        mainHandler.postDelayed(guard, 2_600L)
     }
 
     fun stopGeneration() {
@@ -274,6 +327,7 @@ class AntigravityBridgeEngine(
     }
 
     fun destroy() {
+        sendUnlockGuard?.let { mainHandler.removeCallbacks(it) }
         parserExecutor.shutdownNow()
         webView?.apply {
             stopLoading()
@@ -313,15 +367,25 @@ class AntigravityBridgeEngine(
         }
 
         @JavascriptInterface
+        fun dispatchTrustedTap(normX: Double, normY: Double) {
+            mainHandler.post {
+                performTrustedTap(normX.toFloat(), normY.toFloat())
+            }
+        }
+
+        @JavascriptInterface
+        fun dispatchTrustedEnter() {
+            mainHandler.post {
+                val view = webView ?: return@post
+                view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+                view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+            }
+        }
+
+        @JavascriptInterface
         fun onPromptSendResult(ok: Boolean, reason: String?) {
             mainHandler.post {
-                val view = webView
-                if (view != null && !interactiveMode) {
-                    view.clearFocus()
-                    view.isFocusable = false
-                    view.isFocusableInTouchMode = false
-                    view.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                }
+                restoreFocusLock()
                 val cb = pendingSendCallback
                 pendingSendCallback = null
                 cb?.invoke(ok, reason.orEmpty())

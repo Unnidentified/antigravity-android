@@ -17,12 +17,12 @@ object AntigravityBridgeScript {
             window.location.replace('https://antigravity.google.com/remote');
             return;
           }
-          if (window.__agBridge && window.__agBridge.version === 6) {
+          if (window.__agBridge && window.__agBridge.version === 7) {
             window.__agBridge.syncNow();
             return;
           }
 
-          const BRIDGE_VERSION = 6;
+          const BRIDGE_VERSION = 7;
           let cachedModels = [];
           let cachedConversations = [];
           let cachedQuota = {
@@ -34,6 +34,9 @@ object AntigravityBridgeScript {
             isLive: false
           };
           let syncTimer = null;
+          let streamingHeartbeatTimer = null;
+          let streamingHeartbeatTicks = 0;
+          let lastQuotaDiag = '';
           let lastPayloadHash = '';
           let isInternalModalProbe = false;
           let modelsPrewarmed = false;
@@ -125,6 +128,22 @@ object AntigravityBridgeScript {
               return true;
             } catch (_) {
               try { el.click(); return true; } catch (__) { return false; }
+            }
+          }
+
+          function dispatchNativeTap(el) {
+            if (!el) return false;
+            try {
+              if (!window.AntigravityNative || !window.AntigravityNative.dispatchTrustedTap) return false;
+              const rect = el.getBoundingClientRect();
+              if (rect.width <= 0 || rect.height <= 0 || window.innerWidth <= 0 || window.innerHeight <= 0) return false;
+              const normX = (rect.left + rect.width / 2) / window.innerWidth;
+              const normY = (rect.top + rect.height / 2) / window.innerHeight;
+              if (normX <= 0 || normX >= 1 || normY <= 0 || normY >= 1) return false;
+              window.AntigravityNative.dispatchTrustedTap(normX, normY);
+              return true;
+            } catch (_) {
+              return false;
             }
           }
 
@@ -639,12 +658,28 @@ object AntigravityBridgeScript {
             return items;
           }
 
+          function extractLinesFromNode(node) {
+            if (!node) return [];
+            if (node.isConnected && node.innerText) {
+              return node.innerText
+                .split('\n')
+                .map(cleanText)
+                .filter(Boolean);
+            }
+            const lines = [];
+            const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+            let cur;
+            while ((cur = walker.nextNode())) {
+              const t = cleanText(cur.nodeValue);
+              if (t) lines.push(t);
+            }
+            return lines;
+          }
+
           function parseUsagePane(pane) {
             if (!pane) return null;
-            const rawLines = (pane.innerText || '')
-              .split('\n')
-              .map(cleanText)
-              .filter(l => l.length > 0 && !/^(back|view usage|usage|quota|model)$/i.test(l));
+            const rawLines = extractLinesFromNode(pane)
+              .filter(l => l.length > 0 && !/^(back|view usage|usage|quota|model|close|done)$/i.test(l));
             if (rawLines.length === 0) return null;
 
             const joined = rawLines.join(' • ');
@@ -665,14 +700,14 @@ object AntigravityBridgeScript {
             }
 
             const resetLine = rawLines.find(l => /resets?\s+(?:in|at|on)/i.test(l)) || '';
-            const statusLine = rawLines.find(l => l !== resetLine && /(\d+\s*%|remaining|used|quota|limit|available|credits)/i.test(l))
-              || rawLines.find(l => l !== resetLine)
+            const statusLine = rawLines.find(l => l !== resetLine && /(\d+\s*%|remaining|used|quota|limit|available|credits|unlimited)/i.test(l))
+              || rawLines.filter(l => l !== resetLine).slice(0, 2).join(' • ')
               || '';
             const planLine = rawLines.find(l => /(ultra|pro|standard|free|enterprise|workspace|plan)/i.test(l) && l.length < 36) || 'Antigravity';
 
             return {
               usedPercent: usedPct,
-              remainingLabel: statusLine.slice(0, 72),
+              remainingLabel: statusLine.slice(0, 88),
               resetLabel: resetLine.slice(0, 48),
               planLabel: planLine,
               rawSummary: statusLine.slice(0, 96),
@@ -741,6 +776,7 @@ object AntigravityBridgeScript {
               });
             }
 
+            const diagBase = 'turns=' + messages.length + ', chats=' + conversations.length + ', models=' + cachedModels.length + ', composer=' + (!!composer);
             return {
               url: window.location.href,
               title: title,
@@ -754,7 +790,7 @@ object AntigravityBridgeScript {
               messages: messages,
               quota: cachedQuota,
               composerReady: !!composer,
-              diagnosticsNote: 'turns=' + messages.length + ', chats=' + conversations.length + ', models=' + cachedModels.length + ', composer=' + (!!composer)
+              diagnosticsNote: lastQuotaDiag ? (diagBase + ', ' + lastQuotaDiag) : diagBase
             };
           }
 
@@ -790,7 +826,54 @@ object AntigravityBridgeScript {
             }, delay);
           }
 
-          async function sendPrompt(text) {
+          function startStreamingHeartbeat() {
+            if (streamingHeartbeatTimer) {
+              clearInterval(streamingHeartbeatTimer);
+              streamingHeartbeatTimer = null;
+            }
+            streamingHeartbeatTicks = 0;
+            streamingHeartbeatTimer = setInterval(() => {
+              streamingHeartbeatTicks++;
+              syncNow(false);
+              if (detectStreaming()) {
+                streamingHeartbeatTicks = Math.min(streamingHeartbeatTicks, 12);
+              } else if (streamingHeartbeatTicks >= 58) {
+                clearInterval(streamingHeartbeatTimer);
+                streamingHeartbeatTimer = null;
+              }
+            }, 600);
+          }
+
+          function focusComposer() {
+            const input = findComposerInput();
+            if (!input) return false;
+            try {
+              const rect = input.getBoundingClientRect();
+              if (rect.top < 0 || rect.bottom > window.innerHeight) {
+                input.scrollIntoView({ block: 'center', inline: 'center' });
+              }
+              simulateTap(input);
+              dispatchNativeTap(input);
+              input.focus();
+              if (input.isContentEditable) {
+                const range = document.createRange();
+                range.selectNodeContents(input);
+                if (cleanText(input.textContent).length === 0) {
+                  range.collapse(false);
+                }
+                const sel = window.getSelection();
+                if (sel) {
+                  sel.removeAllRanges();
+                  sel.addRange(range);
+                }
+              }
+              return true;
+            } catch (_) {
+              return false;
+            }
+          }
+
+          async function submitPromptAfterCommit(text) {
             const report = (ok, reason) => {
               try {
                 if (window.AntigravityNative && window.AntigravityNative.onPromptSendResult) {
@@ -806,66 +889,63 @@ object AntigravityBridgeScript {
             }
 
             try {
-              simulateTap(input);
-              input.focus();
-              await sleep(60);
+              await sleep(80);
+              const existing = cleanText(input.textContent || input.value || '');
+              if (existing.length === 0) {
+                input.focus();
+                const tag = (input.tagName || '').toLowerCase();
+                if (tag === 'textarea' || tag === 'input') {
+                  const proto = tag === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                  if (desc && desc.set) desc.set.call(input, text);
+                  else input.value = text;
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                  input.dispatchEvent(new Event('change', { bubbles: true }));
+                } else {
+                  const range = document.createRange();
+                  range.selectNodeContents(input);
+                  const sel = window.getSelection();
+                  if (sel) {
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                  }
 
-              const tag = (input.tagName || '').toLowerCase();
-              if (tag === 'textarea' || tag === 'input') {
-                const proto = tag === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-                const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-                if (desc && desc.set) desc.set.call(input, text);
-                else input.value = text;
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-              } else {
-                // Place real DOM selection inside Lexical/ProseMirror contenteditable editor
-                const range = document.createRange();
-                range.selectNodeContents(input);
-                const sel = window.getSelection();
-                if (sel) {
-                  sel.removeAllRanges();
-                  sel.addRange(range);
-                }
-
-                // 1. execCommand('insertText') with focused WebView (works cleanly on Lexical/ProseMirror!)
-                let inserted = false;
-                try {
-                  document.execCommand('selectAll', false, null);
-                  document.execCommand('insertText', false, text);
-                  await sleep(60);
-                  if (cleanText(input.textContent).length > 0) inserted = true;
-                } catch (_) {}
-
-                // 2. ClipboardEvent('paste') fallback
-                if (!inserted) {
+                  let inserted = false;
                   try {
-                    const dt = new DataTransfer();
-                    dt.setData('text/plain', text);
-                    input.dispatchEvent(new ClipboardEvent('paste', {
-                      bubbles: true,
-                      cancelable: true,
-                      clipboardData: dt
-                    }));
+                    document.execCommand('selectAll', false, null);
+                    document.execCommand('insertText', false, text);
                     await sleep(60);
                     if (cleanText(input.textContent).length > 0) inserted = true;
                   } catch (_) {}
-                }
 
-                // 3. InputEvent('beforeinput') + InputEvent('input') fallback
-                if (!inserted) {
-                  input.dispatchEvent(new InputEvent('beforeinput', {
-                    bubbles: true,
-                    cancelable: true,
-                    inputType: 'insertText',
-                    data: text
-                  }));
-                  input.dispatchEvent(new InputEvent('input', {
-                    bubbles: true,
-                    inputType: 'insertText',
-                    data: text
-                  }));
-                  await sleep(60);
+                  if (!inserted) {
+                    try {
+                      const dt = new DataTransfer();
+                      dt.setData('text/plain', text);
+                      input.dispatchEvent(new ClipboardEvent('paste', {
+                        bubbles: true,
+                        cancelable: true,
+                        clipboardData: dt
+                      }));
+                      await sleep(60);
+                      if (cleanText(input.textContent).length > 0) inserted = true;
+                    } catch (_) {}
+                  }
+
+                  if (!inserted) {
+                    input.dispatchEvent(new InputEvent('beforeinput', {
+                      bubbles: true,
+                      cancelable: true,
+                      inputType: 'insertText',
+                      data: text
+                    }));
+                    input.dispatchEvent(new InputEvent('input', {
+                      bubbles: true,
+                      inputType: 'insertText',
+                      data: text
+                    }));
+                    await sleep(60);
+                  }
                 }
               }
 
@@ -873,30 +953,63 @@ object AntigravityBridgeScript {
               const sendBtn = await waitFor(() => {
                 const btn = getAppRoot().querySelector('[data-testid="send-button"], button[aria-label="Send message"]');
                 return (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' && isVisible(btn)) ? btn : null;
-              }, 800, 45);
+              }, 900, 45);
 
               if (sendBtn) {
-                simulateTap(sendBtn);
-                await sleep(160);
-                const stillHasText = cleanText(input.textContent || input.value || '') === cleanText(text);
-                if (stillHasText) {
+                // 1. Genuine isTrusted Android MotionEvent tap on send-button
+                dispatchNativeTap(sendBtn);
+                await sleep(220);
+
+                // 2. Fallback synthetic tap if input still has text
+                if (cleanText(input.textContent || input.value || '').length > 0) {
+                  simulateTap(sendBtn);
+                  await sleep(180);
+                }
+
+                // 3. Fallback trusted Android KEYCODE_ENTER if input still has text
+                if (cleanText(input.textContent || input.value || '').length > 0) {
+                  input.focus();
+                  if (window.AntigravityNative && window.AntigravityNative.dispatchTrustedEnter) {
+                    window.AntigravityNative.dispatchTrustedEnter();
+                  } else {
+                    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+                  }
+                  await sleep(250);
+                }
+
+                const cleared = cleanText(input.textContent || input.value || '').length === 0;
+                startStreamingHeartbeat();
+                setTimeout(() => syncNow(true), 300);
+                setTimeout(() => syncNow(true), 1000);
+                report(cleared, cleared ? 'sent' : 'input did not clear');
+                return cleared;
+              } else {
+                input.focus();
+                if (window.AntigravityNative && window.AntigravityNative.dispatchTrustedEnter) {
+                  window.AntigravityNative.dispatchTrustedEnter();
+                } else {
                   input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
                 }
-                report(true, 'sent');
-              } else {
-                input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-                await sleep(180);
+                await sleep(250);
                 const cleared = cleanText(input.textContent || input.value || '').length === 0;
+                if (cleared) {
+                  startStreamingHeartbeat();
+                  setTimeout(() => syncNow(true), 300);
+                  setTimeout(() => syncNow(true), 1000);
+                }
                 report(cleared, cleared ? 'sent via enter' : 'send button stayed disabled');
+                return cleared;
               }
-
-              setTimeout(() => syncNow(true), 350);
-              setTimeout(() => syncNow(true), 1200);
-              return true;
             } catch (err) {
               report(false, String(err));
               return false;
             }
+          }
+
+          async function sendPrompt(text) {
+            focusComposer();
+            await sleep(70);
+            return submitPromptAfterCommit(text);
           }
 
           function stopGeneration() {
@@ -1002,9 +1115,73 @@ object AntigravityBridgeScript {
             return true;
           }
 
+          function findUsageContainerFromSheet(panel, allowLoose) {
+            const usageSignalRe = /(%|resets?\s+(?:in|at|on)|quota|usage|remaining|limit|credits|available|unlimited)/i;
+            const sheetRoot = panel && panel.closest ? panel.closest('[data-testid="bottom-sheet"], [role="dialog"]') : null;
+
+            // 1. Walk ancestors from panel up to sheetRoot and check sibling subtrees (handles nested slide wrappers)
+            if (panel && sheetRoot) {
+              let node = panel;
+              while (node && node !== sheetRoot) {
+                const parent = node.parentElement;
+                if (!parent) break;
+                const siblings = Array.from(parent.children).filter(ch => ch !== node);
+                for (const sib of siblings) {
+                  if (sib.querySelector('[data-testid="model-selector-panel"], [data-testid="model-selector-effort-option"]')) {
+                    continue;
+                  }
+                  const hasBar = !!sib.querySelector('[role="progressbar"], meter');
+                  const txt = cleanText(sib.innerText || sib.textContent);
+                  if (hasBar || (txt.length > 4 && !/thinking effort/i.test(txt) && (usageSignalRe.test(txt) || (allowLoose && txt.length > 10)))) {
+                    return sib;
+                  }
+                }
+                node = parent;
+              }
+            }
+
+            // 2. Check any newly opened separate dialog/sheet not containing model-selector-panel
+            const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-testid="bottom-sheet"]'))
+              .filter(isVisible);
+            for (let i = dialogs.length - 1; i >= 0; i--) {
+              if (!dialogs[i].querySelector('[data-testid="model-selector-panel"]')) {
+                const hasBar = !!dialogs[i].querySelector('[role="progressbar"], meter');
+                const txt = cleanText(dialogs[i].innerText || dialogs[i].textContent);
+                if (hasBar || (txt.length > 4 && (usageSignalRe.test(txt) || (allowLoose && txt.length > 10)))) {
+                  return dialogs[i];
+                }
+              }
+            }
+
+            // 3. Fallback: clone sheetRoot and strip model-selector-panel / effort-option nodes
+            if (sheetRoot) {
+              const clone = sheetRoot.cloneNode(true);
+              clone.querySelectorAll('[data-testid="model-selector-panel"], [data-testid="model-selector-effort-option"], [data-testid="bottom-sheet-backdrop"]').forEach(el => {
+                if (el.parentNode) el.parentNode.removeChild(el);
+              });
+              const hasBar = !!clone.querySelector('[role="progressbar"], meter');
+              const txt = cleanText(clone.textContent);
+              if (hasBar || (txt.length > 6 && !/thinking effort/i.test(txt) && (usageSignalRe.test(txt) || (allowLoose && txt.length > 14)))) {
+                return clone;
+              }
+            }
+
+            // 4. Fallback: check non-chat overlay inside appRoot (e.g. if Usage renders as an inline pane)
+            const root = getAppRoot();
+            const bars = Array.from(root.querySelectorAll('[role="progressbar"], meter')).filter(b => {
+              if (!isVisible(b)) return false;
+              return !b.closest('[data-testid="conversation-view"]') && !b.closest('[data-testid="conversation-list-sidebar"]');
+            });
+            if (bars.length > 0) {
+              return bars[0].closest('section, article, [role="dialog"], div') || bars[0].parentElement;
+            }
+            return null;
+          }
+
           async function refreshQuota() {
             const btn = findModelSelectorButton();
             if (!btn) {
+              lastQuotaDiag = 'usage=no-model-btn';
               syncNow(true);
               return false;
             }
@@ -1016,44 +1193,35 @@ object AntigravityBridgeScript {
               if (!document.querySelector('[data-testid="model-selector-panel"]')) {
                 simulateTap(btn);
               }
-              const panel = await waitFor(() => document.querySelector('[data-testid="model-selector-panel"]'), 1000, 40);
-              const usageBtn = panel && Array.from(panel.querySelectorAll('button.agy-overlay-item'))
+              const panel = await waitFor(() => document.querySelector('[data-testid="model-selector-panel"]'), 1200, 40);
+              const usageBtn = panel && Array.from(panel.querySelectorAll('button.agy-overlay-item, a.agy-overlay-item, button, a'))
                 .find(b => /view usage/i.test(cleanText(b.textContent)));
 
               if (!usageBtn) {
+                lastQuotaDiag = 'usage=no-view-btn';
                 dismissOverlays();
                 return false;
               }
 
               simulateTap(usageBtn);
 
-              // Look inside the sibling slide-pane of [data-testid="model-selector-panel"] OR any new dialog!
+              const startedAt = Date.now();
               const usagePane = await waitFor(() => {
-                const slideContainer = panel.parentElement;
-                if (slideContainer) {
-                  const siblings = Array.from(slideContainer.children).filter(ch => ch !== panel);
-                  for (const sib of siblings) {
-                    const txt = cleanText(sib.innerText);
-                    if (txt.length > 4 && !/thinking effort/i.test(txt) &&
-                        /(%|resets?\s+in|quota|usage|remaining|limit)/i.test(txt)) {
-                      return sib;
-                    }
-                  }
-                }
-                const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [data-testid="bottom-sheet"]'))
-                  .filter(isVisible);
-                for (let i = dialogs.length - 1; i >= 0; i--) {
-                  if (!dialogs[i].querySelector('[data-testid="model-selector-panel"]')) {
-                    const txt = cleanText(dialogs[i].innerText);
-                    if (txt.length > 4) return dialogs[i];
-                  }
-                }
-                return null;
-              }, 1600, 60);
+                const allowLoose = (Date.now() - startedAt) > 1500;
+                return findUsageContainerFromSheet(panel, allowLoose);
+              }, 3000, 80);
 
               if (usagePane) {
                 const parsed = parseUsagePane(usagePane);
-                if (parsed) cachedQuota = parsed;
+                if (parsed) {
+                  cachedQuota = parsed;
+                  lastQuotaDiag = 'usage=ok(' + (parsed.usedPercent !== null ? parsed.usedPercent + '%' : 'text') + ')';
+                } else {
+                  lastQuotaDiag = 'usage=parse-empty';
+                }
+              } else {
+                const openSheets = document.querySelectorAll('[data-testid="bottom-sheet"], [role="dialog"]').length;
+                lastQuotaDiag = 'usage=miss(sheets=' + openSheets + ',url=' + (window.location.pathname || '') + ')';
               }
               dismissOverlays();
               await sleep(160);
@@ -1228,6 +1396,8 @@ object AntigravityBridgeScript {
           window.__agBridge = {
             version: BRIDGE_VERSION,
             syncNow: () => syncNow(true),
+            focusComposer: focusComposer,
+            submitPromptAfterCommit: submitPromptAfterCommit,
             sendPrompt: sendPrompt,
             stopGeneration: stopGeneration,
             refreshModels: refreshModels,
