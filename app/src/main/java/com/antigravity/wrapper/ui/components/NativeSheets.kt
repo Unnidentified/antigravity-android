@@ -1145,8 +1145,7 @@ fun EmptyChatWelcome(
             Text(
                 text = errorMessage ?: when {
                     bridgeStatus == BridgeStatus.CONNECTING -> "Syncing your workspace and models."
-                    activeModelLabel.isNotBlank() -> activeModelLabel
-                    else -> "Ready for your prompt"
+                    else -> "Start a conversation or pick a prompt below."
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

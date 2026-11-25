@@ -306,8 +306,10 @@ fun AntigravityNativeApp(
                                 onSelectConversation = { conv ->
                                     triggerHaptic()
                                     scope.launch { drawerState.close() }
-                                    viewModel.onStartConversationSwitch()
-                                    bridgeEngine.selectConversation(conv.url, conv.title)
+                                    if (!conv.isActive) {
+                                        viewModel.onStartConversationSwitch()
+                                        bridgeEngine.selectConversation(conv.url, conv.title)
+                                    }
                                 },
                                 onRefreshChats = {
                                     triggerHaptic()

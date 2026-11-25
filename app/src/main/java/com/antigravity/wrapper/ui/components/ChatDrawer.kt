@@ -324,16 +324,17 @@ fun ChatDrawerSheet(
                                 )
                             }
                         }
-                        if (activeModelLabel.isNotBlank()) {
-                            Spacer(modifier = Modifier.height(3.dp))
-                            Text(
-                                text = activeModelLabel,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+                        val quotaSubtitle = quota.remainingLabel
+                            .ifBlank { quota.resetLabel }
+                            .ifBlank { "Tap to check live usage" }
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = quotaSubtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                         Spacer(modifier = Modifier.height(8.dp))
                         LinearProgressIndicator(
                             progress = { ((quota.usedPercent ?: 0f) / 100f).coerceIn(0f, 1f) },

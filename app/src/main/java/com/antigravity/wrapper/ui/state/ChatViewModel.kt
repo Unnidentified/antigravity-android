@@ -37,11 +37,13 @@ data class ChatUiState(
     val isRefreshingQuota: Boolean = false,
     val quotaStatusMessage: String? = null,
     val isSwitchingConversation: Boolean = false,
+    val switchingFromUrl: String? = null,
     val errorMessage: String? = null,
     val lastSyncTimeMillis: Long = 0L
 ) {
     val displayedMessages: List<ChatMessage>
         get() {
+            if (isSwitchingConversation) return emptyList()
             if (optimisticMessages.isEmpty()) return snapshot.messages
             val serverUserTexts = snapshot.messages
                 .filter { it.role == MessageRole.USER }
@@ -111,6 +113,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     current.optimisticModelLabel.substringBefore(" "),
                     ignoreCase = true
                 )
+            val arrivedAtNewThread = current.isSwitchingConversation &&
+                snapshot.messages.isNotEmpty() &&
+                (current.switchingFromUrl.isNullOrBlank() || snapshot.currentUrl != current.switchingFromUrl)
+            val stillSwitching = if (arrivedAtNewThread) false else current.isSwitchingConversation
             current.copy(
                 bridgeStatus = nextStatus,
                 snapshot = snapshot,
@@ -123,7 +129,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     current.quotaStatusMessage
                 },
-                isSwitchingConversation = if (snapshot.messages.isNotEmpty()) false else current.isSwitchingConversation,
+                isSwitchingConversation = stillSwitching,
+                switchingFromUrl = if (stillSwitching) current.switchingFromUrl else null,
                 errorMessage = null,
                 lastSyncTimeMillis = System.currentTimeMillis()
             )
@@ -147,6 +154,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 isRefreshingModels = false,
                 isRefreshingQuota = false,
                 isSwitchingConversation = false,
+                switchingFromUrl = null,
                 errorMessage = description ?: if (isOffline) "No internet connection" else "Unable to connect to Antigravity"
             )
         }
@@ -166,12 +174,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 optimisticMessages = emptyList(),
                 optimisticModelLabel = null,
-                isSwitchingConversation = true
+                isSwitchingConversation = true,
+                switchingFromUrl = it.snapshot.currentUrl
             )
         }
         viewModelScope.launch {
-            delay(2_500L)
-            _uiState.update { it.copy(isSwitchingConversation = false) }
+            delay(3_500L)
+            _uiState.update {
+                it.copy(
+                    isSwitchingConversation = false,
+                    switchingFromUrl = null
+                )
+            }
         }
     }
 
@@ -204,7 +218,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         viewModelScope.launch {
-            delay(2_500L)
+            delay(4_500L)
             _uiState.update { state ->
                 if (state.isRefreshingQuota) {
                     state.copy(
