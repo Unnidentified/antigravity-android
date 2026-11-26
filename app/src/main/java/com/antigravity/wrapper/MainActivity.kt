@@ -135,7 +135,7 @@ class MainActivity : ComponentActivity() {
 
     private fun isDarkForMode(mode: ThemeMode): Boolean {
         return when (mode) {
-            ThemeMode.DARK, ThemeMode.AMOLED -> true
+            ThemeMode.DARK, ThemeMode.SLATE, ThemeMode.AMOLED -> true
             ThemeMode.LIGHT -> false
             ThemeMode.SYSTEM -> {
                 val nightMask = resources.configuration.uiMode and
@@ -228,6 +228,11 @@ class MainActivity : ComponentActivity() {
                     val settings = viewModel.settings.value
                     when {
                         settings.webInspectorMode -> viewModel.setWebInspectorMode(false)
+                        state.diffReviewData != null -> viewModel.closeDiffReview()
+                        state.documentViewerData != null -> viewModel.closeDocumentViewer()
+                        state.isWorkspaceSheetOpen -> viewModel.setWorkspaceSheetOpen(false)
+                        state.isProjectSheetOpen -> viewModel.setProjectSheetOpen(false)
+                        state.isPermissionsSheetOpen -> viewModel.setPermissionsSheetOpen(false)
                         state.isModelSheetOpen -> viewModel.setModelSheetOpen(false)
                         state.isQuotaSheetOpen -> viewModel.setQuotaSheetOpen(false)
                         state.isQuickPromptsSheetOpen -> viewModel.setQuickPromptsSheetOpen(false)
@@ -256,6 +261,7 @@ class MainActivity : ComponentActivity() {
         callback: ValueCallback<Array<Uri>>,
         params: WebChromeClient.FileChooserParams?
     ): Boolean {
+        bridgeEngine.notifyFileChooserOpened()
         filePathCallback?.onReceiveValue(null)
         filePathCallback = callback
 

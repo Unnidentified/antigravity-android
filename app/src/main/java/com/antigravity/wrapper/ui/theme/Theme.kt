@@ -61,6 +61,39 @@ private val AntigravityAmoledColors = AntigravityDarkColors.copy(
     surfaceContainerHighest = Color(0xFF222630)
 )
 
+// Cool charcoal slate + warm sand-gold palette inspired by T3 Code dark theme
+private val AntigravitySlateColors = darkColorScheme(
+    primary = Color(0xFFE2C290),
+    onPrimary = Color(0xFF281D0D),
+    primaryContainer = Color(0xFF3E301E),
+    onPrimaryContainer = Color(0xFFF5E3C6),
+    secondary = Color(0xFF93B8E8),
+    onSecondary = Color(0xFF0E2540),
+    secondaryContainer = Color(0xFF233245),
+    onSecondaryContainer = Color(0xFFD0E3FC),
+    tertiary = Color(0xFF81C784),
+    onTertiary = Color(0xFF0D2E12),
+    tertiaryContainer = Color(0xFF1B3B20),
+    onTertiaryContainer = Color(0xFFC8E6C9),
+    background = Color(0xFF141518),
+    onBackground = Color(0xFFECEEF2),
+    surface = Color(0xFF141518),
+    onSurface = Color(0xFFECEEF2),
+    surfaceVariant = Color(0xFF23252A),
+    onSurfaceVariant = Color(0xFFA0A4AE),
+    surfaceContainerLowest = Color(0xFF101114),
+    surfaceContainerLow = Color(0xFF18191D),
+    surfaceContainer = Color(0xFF1E2025),
+    surfaceContainerHigh = Color(0xFF26282E),
+    surfaceContainerHighest = Color(0xFF31343C),
+    outline = Color(0xFF4A4E58),
+    outlineVariant = Color(0xFF2E3138),
+    error = Color(0xFFF2B8B5),
+    onError = Color(0xFF601410),
+    errorContainer = Color(0xFF8C1D18),
+    onErrorContainer = Color(0xFFF9DEDC)
+)
+
 private val AntigravityLightColors = lightColorScheme(
     primary = Color(0xFF1A56DB),
     onPrimary = Color(0xFFFFFFFF),
@@ -152,7 +185,7 @@ private val AntigravityShapes = Shapes(
 fun isEffectiveDarkTheme(themeMode: ThemeMode): Boolean {
     return when (themeMode) {
         ThemeMode.SYSTEM -> isSystemInDarkTheme()
-        ThemeMode.DARK, ThemeMode.AMOLED -> true
+        ThemeMode.DARK, ThemeMode.SLATE, ThemeMode.AMOLED -> true
         ThemeMode.LIGHT -> false
     }
 }
@@ -167,6 +200,7 @@ fun AntigravityTheme(
     val context = LocalContext.current
 
     val colorScheme = when {
+        themeMode == ThemeMode.SLATE -> AntigravitySlateColors
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val dynamicScheme = if (darkTheme) {
                 dynamicDarkColorScheme(context)

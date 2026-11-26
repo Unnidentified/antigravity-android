@@ -30,15 +30,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
-import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Difference
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Share
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -73,9 +73,11 @@ fun ChatMessageItem(
     expandedReasoningIds: Map<String, Boolean>,
     autoExpandReasoning: Boolean,
     onToggleReasoning: (blockId: String, defaultExpanded: Boolean) -> Unit,
+    onExpandReasoningContent: (blockId: String, blockTitle: String) -> Unit = { _, _ -> },
     onCopyText: (String) -> Unit,
     onShareText: (String) -> Unit,
     onLinkClick: (String) -> Unit,
+    onArtifactClick: (ArtifactCard) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     if (message.role == MessageRole.USER) {
@@ -92,9 +94,11 @@ fun ChatMessageItem(
             expandedReasoningIds = expandedReasoningIds,
             autoExpandReasoning = autoExpandReasoning,
             onToggleReasoning = onToggleReasoning,
+            onExpandReasoningContent = onExpandReasoningContent,
             onCopyText = onCopyText,
             onShareText = onShareText,
             onLinkClick = onLinkClick,
+            onArtifactClick = onArtifactClick,
             modifier = modifier
         )
     }
@@ -145,9 +149,11 @@ private fun AssistantMessageSection(
     expandedReasoningIds: Map<String, Boolean>,
     autoExpandReasoning: Boolean,
     onToggleReasoning: (blockId: String, defaultExpanded: Boolean) -> Unit,
+    onExpandReasoningContent: (blockId: String, blockTitle: String) -> Unit,
     onCopyText: (String) -> Unit,
     onShareText: (String) -> Unit,
     onLinkClick: (String) -> Unit,
+    onArtifactClick: (ArtifactCard) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var copied by remember { mutableStateOf(false) }
@@ -170,15 +176,10 @@ private fun AssistantMessageSection(
                 modifier = Modifier
                     .size(24.dp)
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer),
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.AutoAwesome,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(14.dp)
-                )
+                AgyLogo(modifier = Modifier.size(16.dp))
             }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
@@ -208,7 +209,13 @@ private fun AssistantMessageSection(
                 block = block,
                 expanded = isExpanded,
                 fontScale = fontScale,
-                onToggle = { onToggleReasoning(block.id, defaultExpanded) },
+                onToggle = {
+                    if (!isExpanded && block.content.isBlank()) {
+                        onExpandReasoningContent(block.id, block.title)
+                    }
+                    onToggleReasoning(block.id, defaultExpanded)
+                },
+                onRequestContent = { onExpandReasoningContent(block.id, block.title) },
                 onCopyCode = onCopyText,
                 onLinkClick = onLinkClick
             )
@@ -228,16 +235,14 @@ private fun AssistantMessageSection(
         message.artifacts.forEach { artifact ->
             ArtifactSummaryCard(
                 artifact = artifact,
-                onOpen = {
-                    if (artifact.url.isNotBlank()) {
-                        onLinkClick(artifact.url)
-                    }
-                }
+                onOpen = { onArtifactClick(artifact) }
             )
         }
 
         // Native Message Action Row
-        if (!message.isStreaming && message.markdownContent.isNotBlank()) {
+        val isThinkingStub = message.markdownContent.trim()
+            .matches(Regex("^Thinking(?:\\s+for\\s+\\d+\\s*[sm])?$", RegexOption.IGNORE_CASE))
+        if (!message.isStreaming && message.markdownContent.isNotBlank() && !isThinkingStub) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp)
@@ -278,6 +283,7 @@ fun CollapsibleReasoningCard(
     expanded: Boolean,
     fontScale: Float,
     onToggle: () -> Unit,
+    onRequestContent: () -> Unit = {},
     onCopyCode: (String) -> Unit,
     onLinkClick: (String) -> Unit
 ) {
@@ -286,6 +292,22 @@ fun CollapsibleReasoningCard(
         animationSpec = tween(durationMillis = 220),
         label = "ReasoningChevron"
     )
+    var awaitingContent by remember(block.id) { mutableStateOf(false) }
+    var requestedRemote by remember(block.id) { mutableStateOf(false) }
+
+    LaunchedEffect(expanded, block.content) {
+        if (expanded && block.content.isBlank()) {
+            awaitingContent = true
+            if (!requestedRemote) {
+                requestedRemote = true
+                onRequestContent()
+            }
+            delay(1800L)
+            awaitingContent = false
+        } else {
+            awaitingContent = false
+        }
+    }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -356,12 +378,40 @@ fun CollapsibleReasoningCard(
                         .background(MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.55f))
                         .padding(horizontal = 14.dp, vertical = 12.dp)
                 ) {
-                    NativeMarkdownView(
-                        markdown = block.content,
-                        fontScale = fontScale * 0.92f,
-                        onCopyCode = onCopyCode,
-                        onLinkClick = onLinkClick
-                    )
+                    if (block.content.isNotBlank()) {
+                        NativeMarkdownView(
+                            markdown = block.content,
+                            fontScale = fontScale * 0.92f,
+                            onCopyCode = onCopyCode,
+                            onLinkClick = onLinkClick
+                        )
+                    } else if (awaitingContent) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = "Loading reasoning steps…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = if (block.durationLabel.isNotBlank()) {
+                                "Agent worked for ${block.durationLabel}; detailed step trace is not expanded on the desktop session."
+                            } else {
+                                "No detailed thought steps logged for this section."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
@@ -378,6 +428,8 @@ private fun ArtifactSummaryCard(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(onClick = onOpen)
             .border(
                 width = 1.dp,
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
@@ -404,7 +456,8 @@ private fun ArtifactSummaryCard(
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                     if (artifact.addedLines != null && artifact.removedLines != null) {
                         Spacer(modifier = Modifier.width(8.dp))
@@ -437,16 +490,34 @@ private fun ArtifactSummaryCard(
                     )
                 }
             }
-            if (artifact.url.isNotBlank()) {
-                Spacer(modifier = Modifier.width(8.dp))
-                FilledTonalButton(onClick = onOpen) {
-                    Text(artifact.actionLabel, style = MaterialTheme.typography.labelMedium)
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp)
+            Spacer(modifier = Modifier.width(8.dp))
+            val pillLabel = when {
+                artifact.actionLabel.isNotBlank() -> artifact.actionLabel
+                artifact.addedLines != null -> "Review"
+                else -> "Open"
+            }
+            Surface(
+                shape = RoundedCornerShape(999.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = pillLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
                     )
+                    if (artifact.url.startsWith("http", ignoreCase = true)) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
                 }
             }
         }

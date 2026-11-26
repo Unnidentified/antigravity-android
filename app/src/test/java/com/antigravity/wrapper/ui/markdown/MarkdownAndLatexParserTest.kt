@@ -71,4 +71,50 @@ class MarkdownAndLatexParserTest {
         assertEquals(2, mat.rows.size)
         assertEquals(2, mat.rows[0].size)
     }
+
+    @Test
+    fun handlesNestedListsTasksMathPipesInTablesAndAdvancedLatex() {
+        val md = """
+            > Quoted note with `snake_case_id` and _emphasis_ plus __strong__.
+
+            - Top bullet
+              - Nested bullet with [ ]? No:
+              - [x] Done task
+              - [ ] Open task
+
+            | Formula | Result |
+            | --- | --- |
+            | ${'$'}P(A|B)${'$'} | Conditional |
+
+            $$
+            \begin{aligned}
+            f(n) &= \binom{n}{k} + \mathcal{O}(n \log n) \\
+            g(x) &= \overset{a}{\rightarrow} \underset{i}{x}
+            \end{aligned}
+            $$
+        """.trimIndent()
+
+        val blocks = MarkdownParser.parse(md)
+
+        assertTrue(blocks[0] is MarkdownBlock.BlockQuote)
+        val quotePara = (blocks[0] as MarkdownBlock.BlockQuote).blocks.first() as MarkdownBlock.Paragraph
+        assertTrue(quotePara.inlines.any { it is MarkdownInline.InlineCode && it.code == "snake_case_id" })
+        assertTrue(quotePara.inlines.any { it is MarkdownInline.Italic })
+        assertTrue(quotePara.inlines.any { it is MarkdownInline.Bold })
+
+        val bullets = blocks.first { it is MarkdownBlock.BulletList } as MarkdownBlock.BulletList
+        assertEquals(0, bullets.items[0].depth)
+        assertEquals(1, bullets.items[1].depth)
+        assertEquals(true, bullets.items[2].checked)
+        assertEquals(false, bullets.items[3].checked)
+
+        val table = blocks.first { it is MarkdownBlock.TableBlock } as MarkdownBlock.TableBlock
+        assertEquals(2, table.rows[0].size)
+        assertTrue(table.rows[0][0].any { it is MarkdownInline.InlineMath && it.latex == "P(A|B)" })
+
+        val mathBlock = blocks.first { it is MarkdownBlock.MathBlock } as MarkdownBlock.MathBlock
+        val aligned = LatexParser.parse(mathBlock.latex)
+        assertTrue(aligned is LatexNode.Matrix && aligned.isAligned)
+        assertEquals(2, (aligned as LatexNode.Matrix).rows.size)
+    }
 }
