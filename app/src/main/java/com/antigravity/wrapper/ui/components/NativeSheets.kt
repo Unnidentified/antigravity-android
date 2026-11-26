@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -24,11 +26,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.SheetValue
+import androidx.compose.ui.draw.alpha
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Check
@@ -37,6 +41,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.LaptopMac
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Psychology
@@ -80,11 +85,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.antigravity.wrapper.BuildConfig
 import com.antigravity.wrapper.data.AppSettings
@@ -92,6 +106,7 @@ import com.antigravity.wrapper.data.BridgeStatus
 import com.antigravity.wrapper.data.ModelOption
 import com.antigravity.wrapper.data.QuickPrompt
 import com.antigravity.wrapper.data.QuotaInfo
+import com.antigravity.wrapper.data.QuotaLimitItem
 import com.antigravity.wrapper.data.ThemeMode
 import kotlin.math.roundToInt
 
@@ -106,70 +121,68 @@ fun ModelSelectorSheet(
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val activeEffort = remember(activeModelLabel) {
-        Regex("\\b(Low|Medium|High|Extra)\\b", RegexOption.IGNORE_CASE)
-            .find(activeModelLabel)?.groupValues?.get(1) ?: "High"
-    }
-    var selectedEffort by remember(activeEffort) { mutableStateOf(activeEffort) }
-    val effortChoices = listOf("Low", "Medium", "High", "Extra")
+    val effortLevels = listOf("Low", "Medium", "High", "Extra")
     val activeModelObj = remember(models, activeModelLabel) {
         models.firstOrNull { it.isSelected || activeModelLabel.startsWith(it.name, ignoreCase = true) }
     }
+    val supportedEfforts = remember(activeModelObj) {
+        activeModelObj?.effortOptions?.takeIf { it.isNotEmpty() } ?: effortLevels
+    }
+    val activeEffort = remember(activeModelLabel, supportedEfforts) {
+        val extracted = Regex("\\b(Low|Medium|High|Extra)\\b", RegexOption.IGNORE_CASE)
+            .find(activeModelLabel)?.groupValues?.get(1) ?: "High"
+        if (supportedEfforts.any { it.equals(extracted, ignoreCase = true) }) {
+            extracted
+        } else {
+            supportedEfforts.lastOrNull() ?: "High"
+        }
+    }
+    var selectedEffort by remember(activeEffort) { mutableStateOf(activeEffort) }
+    val showEffortBar = activeModelObj == null || activeModelObj.hasEffortLevels
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        tonalElevation = 0.dp,
+        scrimColor = Color.Black.copy(alpha = 0.6f),
+        contentWindowInsets = { WindowInsets.navigationBars }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 24.dp)
+                .padding(bottom = 28.dp)
         ) {
-            // Balanced single-axis sheet header
+            // Minimal single-axis header: Model + Refresh + Close
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                Text(
+                    text = "Model",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Rounded.Memory,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = "Model",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(
+                    IconButton(
                         onClick = onRefreshModels,
                         enabled = !isRefreshing
                     ) {
                         if (isRefreshing) {
                             CircularProgressIndicator(
                                 strokeWidth = 2.dp,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier.size(18.dp)
                             )
                         } else {
                             Icon(
                                 imageVector = Icons.Rounded.Refresh,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
+                                contentDescription = "Refresh models",
+                                modifier = Modifier.size(20.dp)
                             )
                         }
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isRefreshing) "Syncing" else "Sync models",
-                            style = MaterialTheme.typography.labelMedium
-                        )
                     }
                     IconButton(onClick = onDismiss) {
                         Icon(
@@ -181,38 +194,80 @@ fun ModelSelectorSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Thinking effort selector — applies immediately to the active effort-group model
-            Text(
-                text = "THINKING EFFORT",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                effortChoices.forEach { effort ->
-                    FilterChip(
-                        selected = selectedEffort.equals(effort, ignoreCase = true),
-                        onClick = {
-                            selectedEffort = effort
-                            if (activeModelObj != null && activeModelObj.hasEffortLevels) {
-                                onSelectModel(activeModelObj.name, effort)
-                                onDismiss()
+            // Single unified Thinking Effort selector (left-padded options + ONE dynamic 4-bar meter on the right)
+            if (showEffortBar) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = androidx.compose.foundation.BorderStroke(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 6.dp, top = 6.dp, end = 14.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            effortLevels.forEach { effort ->
+                                val isSupported = supportedEfforts.any { it.equals(effort, ignoreCase = true) }
+                                val isSelectedEffort = isSupported && selectedEffort.equals(effort, ignoreCase = true)
+                                val baseModifier = Modifier
+                                    .clip(RoundedCornerShape(11.dp))
+                                    .alpha(if (isSupported) 1f else 0.34f)
+                                    .background(
+                                        if (isSelectedEffort) {
+                                            MaterialTheme.colorScheme.primaryContainer
+                                        } else {
+                                            Color.Transparent
+                                        }
+                                    )
+                                Box(
+                                    contentAlignment = Alignment.CenterStart,
+                                    modifier = (if (isSupported) {
+                                        baseModifier.clickable {
+                                            selectedEffort = effort
+                                            if (activeModelObj != null && activeModelObj.hasEffortLevels) {
+                                                onSelectModel(activeModelObj.name, effort)
+                                            }
+                                        }
+                                    } else {
+                                        baseModifier
+                                    })
+                                        .padding(horizontal = 11.dp, vertical = 9.dp)
+                                ) {
+                                    Text(
+                                        text = effort,
+                                        style = MaterialTheme.typography.labelLarge.copy(
+                                            fontWeight = if (isSelectedEffort) FontWeight.SemiBold else FontWeight.Medium
+                                        ),
+                                        color = if (isSelectedEffort) {
+                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                        maxLines = 1
+                                    )
+                                }
                             }
-                        },
-                        label = {
-                            Text(
-                                text = effort,
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1
-                            )
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        EffortBarsIcon(
+                            activeBars = effortLevelCount(selectedEffort),
+                            activeColor = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
 
@@ -239,94 +294,84 @@ fun ModelSelectorSheet(
                             Spacer(modifier = Modifier.width(10.dp))
                         }
                         Text(
-                            text = if (isRefreshing) "Loading models…" else "Tap Sync models to fetch available models",
+                            text = if (isRefreshing) "Loading models…" else "Tap Refresh to sync available models",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
             } else {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    models.forEach { model ->
-                        val selected = model.isSelected ||
-                            activeModelLabel.startsWith(model.name, ignoreCase = true)
-                        // Avoid conflicting static Medium badges on unselected effort-group rows
-                        val tierLabel = when {
-                            selected && model.hasEffortLevels -> selectedEffort
-                            !model.hasEffortLevels && model.tier.isNotBlank() -> model.tier
-                            else -> ""
-                        }
-                        Surface(
-                            onClick = {
-                                val chosenTier = if (model.hasEffortLevels) {
-                                    selectedEffort
-                                } else {
-                                    model.tier
-                                }
-                                onSelectModel(model.name, chosenTier)
-                                onDismiss()
-                            },
-                            shape = RoundedCornerShape(16.dp),
-                            color = if (selected) {
-                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-                            } else {
-                                MaterialTheme.colorScheme.surfaceContainerHigh
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .border(
-                                    width = if (selected) 1.2.dp else 0.dp,
-                                    color = if (selected) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.surfaceContainerHigh
-                                    },
-                                    shape = RoundedCornerShape(16.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        models.forEachIndexed { index, model ->
+                            if (index > 0) {
+                                HorizontalDivider(
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                                    modifier = Modifier.padding(horizontal = 14.dp)
                                 )
-                        ) {
+                            }
+                            val selected = model.isSelected ||
+                                activeModelLabel.startsWith(model.name, ignoreCase = true)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 13.dp),
+                                    .background(
+                                        if (selected) {
+                                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                                        } else {
+                                            Color.Transparent
+                                        }
+                                    )
+                                    .clickable {
+                                        val chosenTier = if (model.hasEffortLevels) {
+                                            val validOptions = model.effortOptions.ifEmpty { effortLevels }
+                                            if (validOptions.any { it.equals(selectedEffort, ignoreCase = true) }) {
+                                                selectedEffort
+                                            } else {
+                                                validOptions.lastOrNull() ?: "High"
+                                            }
+                                        } else {
+                                            model.tier
+                                        }
+                                        selectedEffort = chosenTier
+                                        onSelectModel(model.name, chosenTier)
+                                        onDismiss()
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
                                     text = model.name,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = MaterialTheme.colorScheme.onSurface,
+                                    style = MaterialTheme.typography.bodyLarge.copy(
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                                    ),
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.onSurface
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.92f)
+                                    },
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f)
                                 )
-                                if (tierLabel.isNotBlank()) {
+                                if (!model.hasEffortLevels && model.tier.isNotBlank()) {
                                     Spacer(modifier = Modifier.width(8.dp))
-                                    Surface(
-                                        shape = RoundedCornerShape(999.dp),
-                                        color = if (selected) {
-                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-                                        } else {
-                                            MaterialTheme.colorScheme.surfaceContainerHighest
-                                        }
-                                    ) {
-                                        Text(
-                                            text = tierLabel,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = if (selected) {
-                                                MaterialTheme.colorScheme.primary
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            },
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                        )
-                                    }
+                                    Text(
+                                        text = model.tier,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
                                 if (selected) {
-                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Spacer(modifier = Modifier.width(10.dp))
                                     Icon(
                                         imageVector = Icons.Rounded.Check,
                                         contentDescription = "Selected",
@@ -369,14 +414,18 @@ fun UsageQuotaSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        tonalElevation = 0.dp,
+        scrimColor = Color.Black.copy(alpha = 0.6f),
+        contentWindowInsets = { WindowInsets.navigationBars }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 24.dp)
+                .padding(bottom = 28.dp)
         ) {
             // Balanced single-axis header (icon-only Refresh + Close)
             Row(
@@ -426,9 +475,11 @@ fun UsageQuotaSheet(
                 }
             }
 
-            if (!statusMessage.isNullOrBlank()) {
+            val quotaSubtitle = statusMessage?.takeIf { it.isNotBlank() }
+                ?: if (quota.isLiveFromServer) "Live usage synced" else null
+            if (!quotaSubtitle.isNullOrBlank()) {
                 Text(
-                    text = statusMessage,
+                    text = quotaSubtitle,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -436,152 +487,331 @@ fun UsageQuotaSheet(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Compact Quota Card — show ring only when a live percentage is available
-            Surface(
-                shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (quota.usedPercent != null) {
-                        Box(
-                            modifier = Modifier.size(56.dp),
-                            contentAlignment = Alignment.Center
+            val density = LocalDensity.current
+            val ringStroke = remember(density) {
+                with(density) { Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round) }
+            }
+            val smallRingStroke = remember(density) {
+                with(density) { Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round) }
+            }
+
+            if (quota.limits.isNotEmpty()) {
+                val grouped = remember(quota.limits) {
+                    quota.limits.groupBy { normalizeQuotaGroupTitle(it.groupName.ifBlank { quota.planLabel }) }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    grouped.forEach { (groupName, groupLimits) ->
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Canvas(modifier = Modifier.size(52.dp)) {
-                                drawArc(
-                                    color = trackColor,
-                                    startAngle = 0f,
-                                    sweepAngle = 360f,
-                                    useCenter = false,
-                                    style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Text(
+                                    text = groupName,
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
-                                drawArc(
-                                    color = primaryColor,
-                                    startAngle = -90f,
-                                    sweepAngle = (quota.usedPercent / 100f).coerceIn(0.03f, 1f) * 360f,
-                                    useCenter = false,
-                                    style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round)
-                                )
-                            }
-                            Text(
-                                text = "${quota.usedPercent.toInt()}%",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .size(42.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primaryContainer),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (isRefreshing) {
-                                CircularProgressIndicator(
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Rounded.BarChart,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.size(20.dp)
-                                )
+                                groupLimits.forEachIndexed { idx, item ->
+                                    if (idx > 0) {
+                                        HorizontalDivider(
+                                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+                                        )
+                                    }
+                                    QuotaLimitRow(
+                                        item = item,
+                                        ringStroke = smallRingStroke,
+                                        trackColor = trackColor,
+                                        fallbackColor = primaryColor
+                                    )
+                                }
                             }
                         }
                     }
+                }
+            } else {
+                val headlinePct = quota.headlineLeftPercent
+                val quotaAccessibilitySummary = buildString {
+                    append(quota.planLabel)
+                    headlinePct?.let { append(", ${it.toInt()} percent left") }
+                    if (quota.remainingLabel.isNotBlank()) append(", ${quota.remainingLabel}")
+                    if (quota.resetLabel.isNotBlank()) append(", ${quota.resetLabel}")
+                }
 
-                    Spacer(modifier = Modifier.width(14.dp))
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = quotaAccessibilitySummary
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (headlinePct != null) {
+                            val ringColor = quotaRingColor(headlinePct, primaryColor)
+                            Box(
+                                modifier = Modifier.size(56.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Canvas(modifier = Modifier.size(52.dp)) {
+                                    drawArc(
+                                        color = trackColor,
+                                        startAngle = 0f,
+                                        sweepAngle = 360f,
+                                        useCenter = false,
+                                        style = ringStroke
+                                    )
+                                    drawArc(
+                                        color = ringColor,
+                                        startAngle = -90f,
+                                        sweepAngle = (headlinePct / 100f).coerceIn(0.03f, 1f) * 360f,
+                                        useCenter = false,
+                                        style = ringStroke
+                                    )
+                                }
+                                Text(
+                                    text = "${headlinePct.toInt()}%",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isRefreshing) {
+                                    CircularProgressIndicator(
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Rounded.BarChart,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
 
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = quota.planLabel,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = when {
-                                isRefreshing -> "Checking live quota…"
-                                quota.remainingLabel.isNotBlank() -> quota.remainingLabel
-                                else -> "Tap Refresh above to sync usage stats"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (quota.resetLabel.isNotBlank()) {
-                            Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.width(14.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = quota.resetLabel,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
+                                text = quota.planLabel,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = when {
+                                    isRefreshing -> "Checking live quota…"
+                                    quota.remainingLabel.isNotBlank() -> quota.remainingLabel
+                                    else -> "Tap Refresh above to sync 5h & weekly limits"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (quota.resetLabel.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = quota.resetLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
+            val resolvedModel = activeModelLabel.ifBlank { "Syncing…" }
             Surface(
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(18.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = "Session info: model $resolvedModel, $messageCount messages, status ${bridgeStatus.label}"
+                    }
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "ACTIVE MODEL",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = activeModelLabel.ifBlank { "Syncing…" },
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Active Model",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = resolvedModel,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Messages",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = messageCount.toString(),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.End
+                        ) {
+                            Text(
+                                text = "Status",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = bridgeStatus.label,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
                 }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                MetricTile(
-                    label = "Messages",
-                    value = messageCount.toString(),
-                    modifier = Modifier.weight(1f)
-                )
-                MetricTile(
-                    label = "Status",
-                    value = bridgeStatus.label,
-                    modifier = Modifier.weight(1f)
-                )
             }
         }
     }
 }
+
+@Composable
+private fun QuotaLimitRow(
+    item: QuotaLimitItem,
+    ringStroke: Stroke,
+    trackColor: Color,
+    fallbackColor: Color
+) {
+    val pct = item.leftPercent
+    val ringColor = if (pct != null) quotaRingColor(pct, fallbackColor) else fallbackColor
+    val accessibilityLabel = buildString {
+        append("${item.groupName} ${item.windowLabel}")
+        pct?.let { append(", ${it.toInt()} percent left") }
+        if (item.resetLabel.isNotBlank()) append(", ${item.resetLabel}")
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics(mergeDescendants = true) {
+                contentDescription = accessibilityLabel
+            },
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.windowLabel,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (item.resetLabel.isNotBlank()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = item.resetLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (pct != null) {
+                Text(
+                    text = "${pct.toInt()}% left",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Canvas(modifier = Modifier.size(22.dp)) {
+                    drawArc(
+                        color = trackColor,
+                        startAngle = 0f,
+                        sweepAngle = 360f,
+                        useCenter = false,
+                        style = ringStroke
+                    )
+                    drawArc(
+                        color = ringColor,
+                        startAngle = -90f,
+                        sweepAngle = (pct / 100f).coerceIn(0.04f, 1f) * 360f,
+                        useCenter = false,
+                        style = ringStroke
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun normalizeQuotaGroupTitle(raw: String): String {
+    val cleaned = raw.trim().replace(Regex("\\s+"), " ")
+    if (cleaned.isEmpty()) return "Usage Limits"
+    return when {
+        cleaned.equals("GEMINI MODELS", ignoreCase = true) || cleaned.equals("GEMINI", ignoreCase = true) -> "Gemini Models"
+        cleaned.contains("CLAUDE", ignoreCase = true) && cleaned.contains("GPT", ignoreCase = true) -> "Claude & GPT Models"
+        cleaned.equals("CLAUDE MODELS", ignoreCase = true) -> "Claude Models"
+        else -> cleaned.split(' ').joinToString(" ") { word ->
+            when {
+                word.equals("gpt", ignoreCase = true) -> "GPT"
+                word == "&" || word == "/" -> word
+                word.length <= 1 -> word.uppercase()
+                else -> word.lowercase().replaceFirstChar { it.uppercase() }
+            }
+        }
+    }
+}
+
+private fun quotaRingColor(leftPercent: Float, fallback: Color): Color = fallback
 
 @Composable
 private fun MetricTile(
@@ -592,7 +822,9 @@ private fun MetricTile(
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = modifier
+        modifier = modifier.semantics(mergeDescendants = true) {
+            contentDescription = "$label: $value"
+        }
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
@@ -627,15 +859,18 @@ fun QuickPromptsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        tonalElevation = 0.dp,
+        scrimColor = Color.Black.copy(alpha = 0.6f),
+        contentWindowInsets = { WindowInsets.navigationBars }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 24.dp)
+                .padding(bottom = 28.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -643,12 +878,7 @@ fun QuickPromptsSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Rounded.AutoAwesome,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    AgyLogo(modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Quick Prompts",
@@ -831,18 +1061,52 @@ fun SettingsFullScreen(
                         color = MaterialTheme.colorScheme.primary
                     )
                     Spacer(modifier = Modifier.height(10.dp))
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        ThemeMode.entries.forEachIndexed { idx, mode ->
-                            SegmentedButton(
-                                selected = settings.themeMode == mode,
-                                onClick = { onThemeModeChange(mode) },
-                                shape = SegmentedButtonDefaults.itemShape(idx, ThemeMode.entries.size),
-                                label = { Text(mode.label, style = MaterialTheme.typography.labelSmall, maxLines = 1) }
-                            )
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            ThemeMode.entries.forEach { mode ->
+                                val isSelected = settings.themeMode == mode
+                                Surface(
+                                    onClick = { onThemeModeChange(mode) },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isSelected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        Color.Transparent
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(vertical = 8.dp, horizontal = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = mode.label,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (isSelected) {
+                                                MaterialTheme.colorScheme.onPrimary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
 
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && settings.themeMode != ThemeMode.SLATE) {
                         Spacer(modifier = Modifier.height(12.dp))
                         SheetSwitchRow(
                             icon = Icons.Rounded.Palette,
@@ -1065,124 +1329,191 @@ private fun SheetSwitchRow(
             text = title,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(1f)
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 12.dp)
         )
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun EmptyChatWelcome(
     bridgeStatus: BridgeStatus,
+    activeProjectLabel: String,
     activeModelLabel: String,
     isSwitchingConversation: Boolean,
     errorMessage: String?,
-    onSuggestionClick: (String) -> Unit,
+    onOpenProjectSelector: () -> Unit,
+    onOpenModelSelector: () -> Unit,
     onRetryConnect: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        contentAlignment = Alignment.Center
+    Surface(
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        modifier = modifier.fillMaxSize()
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.fillMaxWidth()
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp),
+            contentAlignment = Alignment.Center
         ) {
             if (isSwitchingConversation) {
-                CircularProgressIndicator(
-                    strokeWidth = 3.dp,
-                    modifier = Modifier.size(34.dp)
-                )
-                Spacer(modifier = Modifier.height(14.dp))
-                Text(
-                    text = "Loading conversation…",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                return@Column
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(34.dp)
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text(
+                        text = "Loading conversation…",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                return@Box
             }
-
-            Box(
-                modifier = Modifier
-                    .size(62.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (bridgeStatus == BridgeStatus.OFFLINE || bridgeStatus == BridgeStatus.ERROR) {
-                        Icons.Rounded.WifiOff
-                    } else {
-                        Icons.Rounded.AutoAwesome
-                    },
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(30.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(
-                text = when (bridgeStatus) {
-                    BridgeStatus.OFFLINE -> "You're offline"
-                    BridgeStatus.ERROR -> "Couldn't reach Antigravity"
-                    BridgeStatus.CONNECTING -> "Connecting to Antigravity…"
-                    else -> "How can I help today?"
-                },
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = errorMessage ?: when {
-                    bridgeStatus == BridgeStatus.CONNECTING -> "Syncing your workspace and models."
-                    else -> "Start a conversation or pick a prompt below."
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(22.dp))
 
             if (bridgeStatus == BridgeStatus.OFFLINE || bridgeStatus == BridgeStatus.ERROR) {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = onRetryConnect) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Retry")
-                    }
-                    FilledTonalButton(onClick = onOpenSettings) {
-                        Text("Settings")
-                    }
-                }
-            } else {
-                val suggestions = listOf(
-                    "Review my latest PR",
-                    "Explain Bayes' theorem with LaTeX",
-                    "Debug a Kotlin Coroutines leak",
-                    "Plan a clean refactor"
-                )
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    suggestions.forEach { suggestion ->
-                        SuggestionChip(
-                            onClick = { onSuggestionClick(suggestion) },
-                            label = { Text(suggestion, style = MaterialTheme.typography.labelMedium) }
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.errorContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.WifiOff,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(26.dp)
                         )
                     }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = if (bridgeStatus == BridgeStatus.OFFLINE) "You're offline" else "Couldn't reach Antigravity",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center
+                    )
+                    if (!errorMessage.isNullOrBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = errorMessage,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = onRetryConnect) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Retry")
+                        }
+                        FilledTonalButton(onClick = onOpenSettings) {
+                            Text("Settings")
+                        }
+                    }
+                }
+                return@Box
+            }
+
+            val projectShort = remember(activeProjectLabel) {
+                activeProjectLabel.trim()
+                    .substringAfterLast('/')
+                    .ifBlank { activeProjectLabel.trim() }
+            }
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (projectShort.isNotBlank()) {
+                    Text(
+                        text = buildAnnotatedString {
+                            append("What should we build\nin ")
+                            withStyle(SpanStyle(textDecoration = TextDecoration.Underline)) {
+                                append(projectShort)
+                            }
+                            append("?")
+                        },
+                        style = MaterialTheme.typography.headlineSmall.copy(
+                            fontWeight = FontWeight.Medium
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(onClick = onOpenProjectSelector)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                } else {
+                    Text(
+                        text = if (bridgeStatus == BridgeStatus.CONNECTING) {
+                            "Connecting to Antigravity…"
+                        } else {
+                            "What should we build\ntoday?"
+                        },
+                        style = MaterialTheme.typography.headlineSmall.copy(
+                            fontWeight = FontWeight.Medium
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .clickable(onClick = onOpenSettings)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.LaptopMac,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "on Antigravity",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (bridgeStatus == BridgeStatus.CONNECTED) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.outline
+                                }
+                            )
+                    )
                 }
             }
         }

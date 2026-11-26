@@ -17,6 +17,9 @@ import android.webkit.WebView
 import com.antigravity.wrapper.BuildConfig
 import com.antigravity.wrapper.data.BridgeSnapshot
 import com.antigravity.wrapper.data.BridgeStateParser
+import com.antigravity.wrapper.data.DiffReviewData
+import com.antigravity.wrapper.data.DocumentViewerData
+import com.antigravity.wrapper.data.WorkspaceArtifactItem
 import com.antigravity.wrapper.web.AntigravityWebChromeClient
 import com.antigravity.wrapper.web.AntigravityWebViewClient
 import com.antigravity.wrapper.web.DownloadHandler
@@ -44,6 +47,11 @@ class AntigravityBridgeEngine(
     private var allowProgrammaticTouch: Boolean = false
     private var pendingSendCallback: ((Boolean, String) -> Unit)? = null
     private var sendUnlockGuard: Runnable? = null
+    private var pendingUploadCallback: ((Boolean, String) -> Unit)? = null
+    private var uploadUnlockGuard: Runnable? = null
+    private var pendingDiffCallback: ((DiffReviewData) -> Unit)? = null
+    private var pendingDocumentCallback: ((DocumentViewerData) -> Unit)? = null
+    private var pendingWorkspaceCallback: ((List<WorkspaceArtifactItem>) -> Unit)? = null
 
     @Volatile
     private var lastDeliveredSnapshot: BridgeSnapshot? = null
@@ -262,11 +270,124 @@ class AntigravityBridgeEngine(
         )
     }
 
-    fun triggerFileUpload() {
+    fun loadOlderMessages() {
         webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.loadOlderMessages();",
+            null
+        )
+    }
+
+    fun openReviewDiffs(cardTitle: String = "", onResult: (DiffReviewData) -> Unit) {
+        pendingDiffCallback = onResult
+        val escaped = AntigravityBridgeScript.escapeJsString(cardTitle)
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.openReviewDiffs(\"$escaped\");",
+            null
+        ) ?: onResult(DiffReviewData(error = "Session not ready"))
+    }
+
+    fun openDocumentViewer(title: String, onResult: (DocumentViewerData) -> Unit) {
+        pendingDocumentCallback = onResult
+        val escaped = AntigravityBridgeScript.escapeJsString(title)
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.openDocumentViewer(\"$escaped\");",
+            null
+        ) ?: onResult(DocumentViewerData(title = title, error = "Session not ready"))
+    }
+
+    fun openExternalArtifact(cardTitle: String) {
+        val escaped = AntigravityBridgeScript.escapeJsString(cardTitle)
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.openExternalArtifact(\"$escaped\");",
+            null
+        )
+    }
+
+    fun expandReasoningBlock(blockId: String, blockTitle: String = "") {
+        val escapedId = AntigravityBridgeScript.escapeJsString(blockId)
+        val escapedTitle = AntigravityBridgeScript.escapeJsString(blockTitle)
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.expandReasoningBlock(\"$escapedId\", \"$escapedTitle\");",
+            null
+        )
+    }
+
+    fun fetchWorkspaceOverview(onResult: (List<WorkspaceArtifactItem>) -> Unit) {
+        pendingWorkspaceCallback = onResult
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.fetchWorkspaceOverview();",
+            null
+        ) ?: onResult(emptyList())
+    }
+
+    fun refreshProjects() {
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.refreshProjects();",
+            null
+        )
+    }
+
+    fun selectProject(projectName: String) {
+        val escaped = AntigravityBridgeScript.escapeJsString(projectName)
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.selectProject(\"$escaped\");",
+            null
+        )
+    }
+
+    fun selectPermissions(preset: String) {
+        val escaped = AntigravityBridgeScript.escapeJsString(preset)
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.selectPermissions(\"$escaped\");",
+            null
+        )
+    }
+
+    fun runThreadAction(action: String, argument: String = "") {
+        val escapedAction = AntigravityBridgeScript.escapeJsString(action)
+        val escapedArg = AntigravityBridgeScript.escapeJsString(argument)
+        webView?.evaluateJavascript(
+            "window.__agBridge && window.__agBridge.runThreadAction(\"$escapedAction\", \"$escapedArg\");",
+            null
+        )
+    }
+
+    fun notifyFileChooserOpened() {
+        mainHandler.post {
+            uploadUnlockGuard?.let { mainHandler.removeCallbacks(it) }
+            uploadUnlockGuard = null
+            restoreFocusLock()
+            val cb = pendingUploadCallback
+            pendingUploadCallback = null
+            cb?.invoke(true, "")
+        }
+    }
+
+    fun triggerFileUpload(onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+        val view = webView
+        if (view == null) {
+            onResult(false, "Session not ready")
+            return
+        }
+        pendingUploadCallback = onResult
+        if (!interactiveMode) {
+            view.isFocusable = true
+            view.isFocusableInTouchMode = true
+            view.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        }
+        view.evaluateJavascript(
             "window.__agBridge && window.__agBridge.triggerFileUpload();",
             null
         )
+        uploadUnlockGuard?.let { mainHandler.removeCallbacks(it) }
+        val guard = Runnable {
+            restoreFocusLock()
+            val cb = pendingUploadCallback
+            pendingUploadCallback = null
+            cb?.invoke(false, "File upload is unavailable in this view")
+        }
+        uploadUnlockGuard = guard
+        mainHandler.postDelayed(guard, 1_400L)
     }
 
     fun exportDomSnapshot(onResult: (String?) -> Unit) {
@@ -280,6 +401,14 @@ class AntigravityBridgeEngine(
         ) { raw ->
             parserExecutor.execute {
                 val decoded = decodeJsStringResult(raw)?.takeIf { it.isNotBlank() }
+                if (BuildConfig.DEBUG && !decoded.isNullOrBlank()) {
+                    var offset = 0
+                    while (offset < decoded.length) {
+                        val end = minOf(offset + 3000, decoded.length)
+                        android.util.Log.d("AG_DOM", decoded.substring(offset, end))
+                        offset = end
+                    }
+                }
                 mainHandler.post { onResult(decoded) }
             }
         }
@@ -327,6 +456,7 @@ class AntigravityBridgeEngine(
     }
 
     fun destroy() {
+        uploadUnlockGuard?.let { mainHandler.removeCallbacks(it) }
         sendUnlockGuard?.let { mainHandler.removeCallbacks(it) }
         parserExecutor.shutdownNow()
         webView?.apply {
@@ -389,6 +519,56 @@ class AntigravityBridgeEngine(
                 val cb = pendingSendCallback
                 pendingSendCallback = null
                 cb?.invoke(ok, reason.orEmpty())
+            }
+        }
+
+        @JavascriptInterface
+        fun onFileUploadResult(ok: Boolean, reason: String?) {
+            mainHandler.post {
+                if (!ok) {
+                    uploadUnlockGuard?.let { mainHandler.removeCallbacks(it) }
+                    uploadUnlockGuard = null
+                    restoreFocusLock()
+                    val cb = pendingUploadCallback
+                    pendingUploadCallback = null
+                    cb?.invoke(false, reason.orEmpty())
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onDiffReviewLoaded(json: String?) {
+            parserExecutor.execute {
+                val parsed = BridgeStateParser.parseDiffReview(json)
+                mainHandler.post {
+                    val cb = pendingDiffCallback
+                    pendingDiffCallback = null
+                    cb?.invoke(parsed)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onDocumentLoaded(json: String?) {
+            parserExecutor.execute {
+                val parsed = BridgeStateParser.parseDocumentViewer(json)
+                mainHandler.post {
+                    val cb = pendingDocumentCallback
+                    pendingDocumentCallback = null
+                    cb?.invoke(parsed)
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onWorkspaceOverviewLoaded(json: String?) {
+            parserExecutor.execute {
+                val parsed = BridgeStateParser.parseWorkspaceArtifacts(json)
+                mainHandler.post {
+                    val cb = pendingWorkspaceCallback
+                    pendingWorkspaceCallback = null
+                    cb?.invoke(parsed)
+                }
             }
         }
 

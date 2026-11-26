@@ -42,7 +42,18 @@ class BridgeStateParserTest {
               ],
               "quota": {
                 "usedPercent": 42.5,
-                "remainingLabel": "58% remaining",
+                "leftPercent": 78.0,
+                "fiveHourLeftPercent": 78.0,
+                "fiveHourResetLabel": "Resets in 3h 43m",
+                "weeklyLeftPercent": 93.0,
+                "weeklyResetLabel": "Resets in 6d 22h",
+                "limits": [
+                  {"id": "l1", "groupName": "Gemini Models", "windowLabel": "Weekly limit", "leftPercent": 93.0, "resetLabel": "Resets in 6d 22h"},
+                  {"id": "l2", "groupName": "Gemini Models", "windowLabel": "5h limit", "leftPercent": 78.0, "resetLabel": "Resets in 3h 43m"},
+                  {"id": "l3", "groupName": "Claude and GPT models", "windowLabel": "Weekly limit", "leftPercent": 100.0, "resetLabel": "Resets in 6d 23h"},
+                  {"id": "l4", "groupName": "Claude and GPT models", "windowLabel": "5h limit", "leftPercent": 100.0, "resetLabel": "Resets in 4h 13m"}
+                ],
+                "remainingLabel": "5h: 78% left • Weekly: 93% left",
                 "planLabel": "Antigravity Pro",
                 "isLive": true
               }
@@ -68,6 +79,12 @@ class BridgeStateParserTest {
         assertEquals(5240, snapshot.messages[1].artifacts[0].addedLines)
         assertEquals(323, snapshot.messages[1].artifacts[0].removedLines)
         assertEquals(42.5f, snapshot.quota.usedPercent)
+        assertEquals(78.0f, snapshot.quota.fiveHourLeftPercent)
+        assertEquals("Resets in 3h 43m", snapshot.quota.fiveHourResetLabel)
+        assertEquals(93.0f, snapshot.quota.weeklyLeftPercent)
+        assertEquals("Resets in 6d 22h", snapshot.quota.weeklyResetLabel)
+        assertEquals(4, snapshot.quota.limits.size)
+        assertEquals(78.0f, snapshot.quota.headlineLeftPercent)
         assertTrue(snapshot.quota.isLiveFromServer)
     }
 
@@ -87,9 +104,164 @@ class BridgeStateParserTest {
     }
 
     @Test
+    fun stripsTurnSuffixFromActiveModelAndPlaceholderProject() {
+        val json = """
+            {
+              "url": "https://antigravity.google.com/c/xyz",
+              "title": "Test",
+              "activeModel": "GPT-OSS 120B (Medium). Applies to messages sent after this turn",
+              "activeProject": "No Project"
+            }
+        """.trimIndent()
+
+        val snapshot = BridgeStateParser.parseSnapshot(json)
+        assertNotNull(snapshot)
+        snapshot!!
+        assertEquals("GPT-OSS 120B (Medium)", snapshot.activeModelName)
+        assertEquals("", snapshot.activeProject)
+    }
+
+    @Test
     fun returnsNullOnMalformedOrBlankInput() {
         assertEquals(null, BridgeStateParser.parseSnapshot(null))
         assertEquals(null, BridgeStateParser.parseSnapshot(""))
         assertEquals(null, BridgeStateParser.parseSnapshot("{bad json"))
+    }
+
+    @Test
+    fun slateIsDefaultThemeOnFirstInstall() {
+        assertEquals(ThemeMode.SLATE, ThemeMode.fromKey(null))
+        assertEquals(ThemeMode.SLATE, ThemeMode.fromKey("unknown_key"))
+        assertEquals(ThemeMode.SLATE, AppSettings().themeMode)
+    }
+
+    @Test
+    fun parsesWorkspaceParityFieldsAndDiffAndDocumentPayloads() {
+        val snapJson = """
+            {
+              "url": "https://antigravity.google.com/remote/abc",
+              "title": "AI Agent Handoff Process",
+              "hasOlderMessages": true,
+              "hasSidePanel": true,
+              "projects": [
+                {"id": "p1", "name": "Unnidentified/antigravity-android", "isSelected": true},
+                {"id": "p2", "name": "No Project", "isSelected": false}
+              ]
+            }
+        """.trimIndent()
+        val snap = BridgeStateParser.parseSnapshot(snapJson)
+        assertNotNull(snap)
+        snap!!
+        assertTrue(snap.hasOlderMessages)
+        assertTrue(snap.hasSidePanel)
+        assertEquals(2, snap.projects.size)
+        assertEquals("Unnidentified/antigravity-android", snap.projects[0].name)
+
+        val diffJson = """
+            {
+              "title": "6 files changed",
+              "subtitle": "+292 -25",
+              "files": [
+                {
+                  "id": "f0",
+                  "fileName": "release.yml",
+                  "path": ".github/workflows",
+                  "addedLines": 10,
+                  "removedLines": 2,
+                  "lines": [
+                    {"kind": "hunk", "num": "", "text": "@@ -1,3 +1,5 @@"},
+                    {"kind": "context", "num": "1", "text": "name: Release"},
+                    {"kind": "removed", "num": "2", "text": "old: true"},
+                    {"kind": "added", "num": "2", "text": "new: true"}
+                  ]
+                }
+              ]
+            }
+        """.trimIndent()
+        val diff = BridgeStateParser.parseDiffReview(diffJson)
+        assertEquals("6 files changed", diff.title)
+        assertEquals(1, diff.files.size)
+        assertEquals("release.yml", diff.files[0].fileName)
+        assertEquals(4, diff.files[0].lines.size)
+        assertEquals("2", diff.files[0].lines[3].lineNumber)
+        assertEquals(DiffLineKind.ADDED, diff.files[0].lines[3].kind)
+
+        val docJson = """
+            {
+              "title": "docs/development.md",
+              "markdown": "# Development\nRun `./gradlew test`",
+              "raw": "# Development\nRun `./gradlew test`"
+            }
+        """.trimIndent()
+        val doc = BridgeStateParser.parseDocumentViewer(docJson)
+        assertEquals("docs/development.md", doc.title)
+        assertTrue(doc.markdownContent.contains("# Development"))
+
+        val artifactsJson = """
+            {
+              "artifacts": [
+                {"id": "a1", "title": "HANDOFF.md", "subtitle": "Artifact", "kind": "artifact", "url": ""},
+                {"id": "a2", "title": "PR #12", "subtitle": "GitHub", "kind": "link", "url": "https://github.com/example/pr/12"}
+              ]
+            }
+        """.trimIndent()
+        val artifacts = BridgeStateParser.parseWorkspaceArtifacts(artifactsJson)
+        assertEquals(2, artifacts.size)
+        assertEquals("HANDOFF.md", artifacts[0].title)
+        assertEquals("https://github.com/example/pr/12", artifacts[1].url)
+    }
+
+    @Test
+    fun parsesPerModelEffortOptionsAndPreservesLimits() {
+        val json = """
+            {
+              "url": "https://antigravity.google.com/remote/thread-1",
+              "title": "Test",
+              "models": [
+                {
+                  "id": "m1",
+                  "name": "Gemini 4 Neon",
+                  "tier": "High",
+                  "hasEffortLevels": true,
+                  "effortOptions": ["Low", "Medium", "High", "Extra"],
+                  "isSelected": true
+                },
+                {
+                  "id": "m2",
+                  "name": "Gemini 4 Argon",
+                  "tier": "High",
+                  "hasEffortLevels": true,
+                  "effortOptions": ["Low", "Medium", "High"],
+                  "isSelected": false
+                },
+                {
+                  "id": "m3",
+                  "name": "GPT-OSS 120B (Medium)",
+                  "tier": "Medium",
+                  "hasEffortLevels": false,
+                  "effortOptions": [],
+                  "isSelected": false
+                }
+              ]
+            }
+        """.trimIndent()
+        val snap = BridgeStateParser.parseSnapshot(json)!!
+        assertEquals(3, snap.models.size)
+        assertEquals(listOf("Low", "Medium", "High", "Extra"), snap.models[0].effortOptions)
+        assertEquals(listOf("Low", "Medium", "High"), snap.models[1].effortOptions)
+        assertEquals(emptyList<String>(), snap.models[2].effortOptions)
+    }
+
+    @Test
+    fun parsesMarkdownInlineCodeWithoutTrailingSuperscripts() {
+        val blocks = com.antigravity.wrapper.ui.markdown.MarkdownParser.parse(
+            "Themes `(Dark, AMOLED)` and file `Agent.kt`."
+        )
+        assertTrue(blocks.isNotEmpty())
+        val first = blocks.first() as com.antigravity.wrapper.ui.markdown.MarkdownBlock.Paragraph
+        val inlineCodes = first.inlines.filterIsInstance<com.antigravity.wrapper.ui.markdown.MarkdownInline.InlineCode>()
+        assertEquals(2, inlineCodes.size)
+        assertEquals("(Dark, AMOLED)", inlineCodes[0].code)
+        assertEquals("Agent.kt", inlineCodes[1].code)
     }
 }

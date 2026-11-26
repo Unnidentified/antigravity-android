@@ -5,15 +5,19 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -35,11 +39,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -155,9 +165,8 @@ private fun RenderMarkdownBlock(
                 Box(
                     modifier = Modifier
                         .width(4.dp)
+                        .fillMaxHeight()
                         .background(MaterialTheme.colorScheme.primary)
-                        .padding(vertical = 4.dp)
-                        .fillMaxWidth()
                 )
                 Column(
                     modifier = Modifier
@@ -185,13 +194,22 @@ private fun RenderMarkdownBlock(
                 color = MaterialTheme.colorScheme.onSurface
             )
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                block.items.forEach { itemInlines ->
+                block.items.forEach { entry ->
+                    val bulletGlyph = when {
+                        entry.checked == true -> "☑"
+                        entry.checked == false -> "☐"
+                        entry.depth % 3 == 1 -> "◦"
+                        entry.depth % 3 == 2 -> "▪"
+                        else -> "•"
+                    }
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = (entry.depth * 18).dp),
                         verticalAlignment = Alignment.Top
                     ) {
                         Text(
-                            text = "•",
+                            text = bulletGlyph,
                             style = style.copy(
                                 color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.Bold
@@ -199,7 +217,7 @@ private fun RenderMarkdownBlock(
                             modifier = Modifier.padding(start = 6.dp, end = 10.dp)
                         )
                         InlineRichText(
-                            inlines = itemInlines,
+                            inlines = entry.inlines,
                             style = style,
                             onLinkClick = onLinkClick,
                             modifier = Modifier.weight(1f)
@@ -216,13 +234,15 @@ private fun RenderMarkdownBlock(
                 color = MaterialTheme.colorScheme.onSurface
             )
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                block.items.forEach { (number, itemInlines) ->
+                block.items.forEach { entry ->
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = (entry.depth * 18).dp),
                         verticalAlignment = Alignment.Top
                     ) {
                         Text(
-                            text = "$number.",
+                            text = "${entry.number}.",
                             style = style.copy(
                                 color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.SemiBold
@@ -230,7 +250,7 @@ private fun RenderMarkdownBlock(
                             modifier = Modifier.padding(start = 4.dp, end = 10.dp)
                         )
                         InlineRichText(
-                            inlines = itemInlines,
+                            inlines = entry.inlines,
                             style = style,
                             onLinkClick = onLinkClick,
                             modifier = Modifier.weight(1f)
@@ -266,8 +286,9 @@ private fun InlineRichText(
     modifier: Modifier = Modifier
 ) {
     val primaryColor = MaterialTheme.colorScheme.primary
-    val codeBg = MaterialTheme.colorScheme.surfaceContainerHighest
-    val codeColor = MaterialTheme.colorScheme.onSurface
+    val codeBg = MaterialTheme.colorScheme.primary.copy(alpha = 0.13f)
+    val codeBorder = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
+    val codeColor = MaterialTheme.colorScheme.primary
     val mathColor = MaterialTheme.colorScheme.secondary
 
     val annotated = remember(inlines, primaryColor, codeBg, codeColor, mathColor, style.fontSize) {
@@ -284,10 +305,58 @@ private fun InlineRichText(
         }
     }
 
+    var layoutResult by remember(annotated) { mutableStateOf<TextLayoutResult?>(null) }
+
     Text(
         text = annotated,
         style = style,
-        modifier = modifier
+        onTextLayout = { layoutResult = it },
+        modifier = modifier.drawBehind {
+            val layout = layoutResult ?: return@drawBehind
+            val annotations = annotated.getStringAnnotations("inline_code", 0, annotated.length)
+            if (annotations.isEmpty()) return@drawBehind
+
+            val radiusPx = 5.dp.toPx()
+            val hPadPx = 2.5.dp.toPx()
+            val vPadPx = 0.5.dp.toPx()
+            val borderStrokePx = 0.75.dp.toPx()
+
+            annotations.forEach { range ->
+                val startOffset = range.start.coerceIn(0, annotated.length)
+                val endOffset = range.end.coerceIn(startOffset, annotated.length)
+                if (startOffset >= endOffset) return@forEach
+
+                val firstLine = layout.getLineForOffset(startOffset)
+                val lastLine = layout.getLineForOffset((endOffset - 1).coerceAtLeast(startOffset))
+                for (line in firstLine..lastLine) {
+                    val segStart = if (line == firstLine) startOffset else layout.getLineStart(line)
+                    val segEnd = if (line == lastLine) endOffset else layout.getLineEnd(line, visibleEnd = true)
+                    if (segStart >= segEnd) continue
+
+                    val startBox = layout.getBoundingBox(segStart)
+                    val endBox = layout.getBoundingBox(segEnd - 1)
+                    val left = (minOf(startBox.left, endBox.left) - hPadPx).coerceAtLeast(0f)
+                    val right = (maxOf(startBox.right, endBox.right) + hPadPx).coerceAtMost(size.width)
+                    val top = (minOf(startBox.top, endBox.top) + vPadPx).coerceAtLeast(0f)
+                    val bottom = (maxOf(startBox.bottom, endBox.bottom) - vPadPx).coerceAtMost(size.height)
+                    if (right <= left || bottom <= top) continue
+
+                    drawRoundRect(
+                        color = codeBg,
+                        topLeft = Offset(left, top),
+                        size = Size(right - left, bottom - top),
+                        cornerRadius = CornerRadius(radiusPx, radiusPx)
+                    )
+                    drawRoundRect(
+                        color = codeBorder,
+                        topLeft = Offset(left, top),
+                        size = Size(right - left, bottom - top),
+                        cornerRadius = CornerRadius(radiusPx, radiusPx),
+                        style = Stroke(width = borderStrokePx)
+                    )
+                }
+            }
+        }
     )
 }
 
@@ -319,15 +388,17 @@ private fun AnnotatedString.Builder.appendInlines(
                 pop()
             }
             is MarkdownInline.InlineCode -> {
+                pushStringAnnotation(tag = "inline_code", annotation = inline.code)
                 pushStyle(
                     SpanStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = baseSize * 0.9f,
-                        background = codeBg,
+                        fontSize = baseSize * 0.88f,
+                        fontWeight = FontWeight.Medium,
                         color = codeColor
                     )
                 )
-                append(" ${inline.code} ")
+                append(inline.code)
+                pop()
                 pop()
             }
             is MarkdownInline.InlineMath -> {
@@ -426,12 +497,25 @@ private fun AnnotatedString.Builder.appendLatexInlineNode(
                 }
             )
         }
+        is LatexNode.Stacked -> {
+            appendLatexInlineNode(node.body, baseSize)
+            node.above?.let { ab ->
+                pushStyle(SpanStyle(fontSize = baseSize * 0.68f, baselineShift = BaselineShift.Superscript))
+                appendLatexInlineNode(ab, baseSize * 0.68f)
+                pop()
+            }
+            node.below?.let { bl ->
+                pushStyle(SpanStyle(fontSize = baseSize * 0.68f, baselineShift = BaselineShift.Subscript))
+                appendLatexInlineNode(bl, baseSize * 0.68f)
+                pop()
+            }
+        }
         is LatexNode.Matrix -> {
             append(node.leftDelim)
             node.rows.forEachIndexed { rIdx, row ->
                 if (rIdx > 0) append("; ")
                 row.forEachIndexed { cIdx, cell ->
-                    if (cIdx > 0) append(", ")
+                    if (cIdx > 0) append(if (node.isAligned) " " else ", ")
                     appendLatexInlineNode(cell, baseSize)
                 }
             }
@@ -554,7 +638,7 @@ private fun NativeLatexDisplayCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 20.dp, vertical = 18.dp),
+                    .padding(start = 18.dp, end = 42.dp, top = 16.dp, bottom = 16.dp),
                 contentAlignment = Alignment.Center
             ) {
                 RenderLatexNode(
@@ -623,7 +707,12 @@ private fun RenderLatexNode(
                     .padding(horizontal = 4.dp)
                     .width(IntrinsicSize.Max)
             ) {
-                Box(modifier = Modifier.padding(horizontal = 4.dp)) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp)
+                ) {
                     RenderLatexNode(node.numerator, fontSize * 0.85f, color)
                 }
                 HorizontalDivider(
@@ -633,7 +722,12 @@ private fun RenderLatexNode(
                         .fillMaxWidth()
                         .padding(vertical = 2.dp)
                 )
-                Box(modifier = Modifier.padding(horizontal = 4.dp)) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp)
+                ) {
                     RenderLatexNode(node.denominator, fontSize * 0.85f, color)
                 }
             }
@@ -690,17 +784,36 @@ private fun RenderLatexNode(
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     RenderLatexNode(node.base, fontSize, color)
-                    Column(
-                        verticalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.padding(start = 1.dp)
-                    ) {
-                        if (node.superscript != null) {
-                            RenderLatexNode(node.superscript, fontSize * 0.68f, color)
-                        } else {
-                            Spacer(modifier = Modifier.height(6.dp))
+                    val scriptGap = (fontSize.value * 0.38f).dp
+                    when {
+                        node.superscript != null && node.subscript != null -> {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                modifier = Modifier.padding(start = 1.dp)
+                            ) {
+                                Box(modifier = Modifier.offset(y = (-1).dp)) {
+                                    RenderLatexNode(node.superscript, fontSize * 0.66f, color)
+                                }
+                                Box(modifier = Modifier.offset(y = 1.dp)) {
+                                    RenderLatexNode(node.subscript, fontSize * 0.66f, color)
+                                }
+                            }
                         }
-                        if (node.subscript != null) {
-                            RenderLatexNode(node.subscript, fontSize * 0.68f, color)
+                        node.superscript != null -> {
+                            Box(
+                                modifier = Modifier
+                                    .padding(start = 1.dp, bottom = scriptGap)
+                            ) {
+                                RenderLatexNode(node.superscript, fontSize * 0.68f, color)
+                            }
+                        }
+                        node.subscript != null -> {
+                            Box(
+                                modifier = Modifier
+                                    .padding(start = 1.dp, top = scriptGap)
+                            ) {
+                                RenderLatexNode(node.subscript, fontSize * 0.68f, color)
+                            }
                         }
                     }
                 }
@@ -714,6 +827,21 @@ private fun RenderLatexNode(
                     style = TextStyle(fontSize = fontSize * 0.65f, color = color, lineHeight = fontSize * 0.65f)
                 )
                 RenderLatexNode(node.body, fontSize, color)
+            }
+        }
+
+        is LatexNode.Stacked -> {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(horizontal = 2.dp)
+            ) {
+                node.above?.let {
+                    RenderLatexNode(it, fontSize * 0.68f, color)
+                }
+                RenderLatexNode(node.body, fontSize, color)
+                node.below?.let {
+                    RenderLatexNode(it, fontSize * 0.68f, color)
+                }
             }
         }
 
@@ -731,10 +859,13 @@ private fun RenderLatexNode(
                         modifier = Modifier.padding(end = 4.dp)
                     )
                 }
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(
+                    horizontalAlignment = if (node.isAligned) Alignment.Start else Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(if (node.isAligned) 8.dp else 6.dp)
+                ) {
                     node.rows.forEach { row ->
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(if (node.isAligned) 4.dp else 14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             row.forEach { cell ->
@@ -789,37 +920,59 @@ private fun NativeMarkdownTable(
                 shape = RoundedCornerShape(14.dp)
             )
     ) {
-        Column(modifier = Modifier.horizontalScroll(rememberScrollState())) {
-            Row(
-                modifier = Modifier
-                    .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(vertical = 10.dp, horizontal = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                for (c in 0 until colCount) {
-                    Box(modifier = Modifier.width(128.dp)) {
-                        InlineRichText(
-                            inlines = headers.getOrElse(c) { emptyList() },
-                            style = headerStyle,
-                            onLinkClick = onLinkClick
-                        )
-                    }
-                }
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val minTableWidth = maxWidth
+            val needsHorizontalScroll = (colCount * 128 + (colCount - 1) * 16 + 24).dp > minTableWidth
+            val colModifier = if (needsHorizontalScroll) {
+                Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .width(IntrinsicSize.Max)
+                    .widthIn(min = minTableWidth)
+            } else {
+                Modifier.fillMaxWidth()
             }
-
-            rows.forEach { row ->
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+            Column(modifier = colModifier) {
                 Row(
-                    modifier = Modifier.padding(vertical = 9.dp, horizontal = 12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceContainer)
+                        .padding(vertical = 10.dp, horizontal = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     for (c in 0 until colCount) {
-                        Box(modifier = Modifier.width(128.dp)) {
+                        Box(
+                            modifier = if (needsHorizontalScroll) Modifier.width(128.dp) else Modifier.weight(1f)
+                        ) {
                             InlineRichText(
-                                inlines = row.getOrElse(c) { emptyList() },
-                                style = cellStyle,
+                                inlines = headers.getOrElse(c) { emptyList() },
+                                style = headerStyle,
                                 onLinkClick = onLinkClick
                             )
+                        }
+                    }
+                }
+
+                rows.forEach { row ->
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 9.dp, horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        for (c in 0 until colCount) {
+                            Box(
+                                modifier = if (needsHorizontalScroll) Modifier.width(128.dp) else Modifier.weight(1f)
+                            ) {
+                                InlineRichText(
+                                    inlines = row.getOrElse(c) { emptyList() },
+                                    style = cellStyle,
+                                    onLinkClick = onLinkClick
+                                )
+                            }
                         }
                     }
                 }

@@ -1,12 +1,15 @@
 package com.antigravity.wrapper.ui
 
+import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.WebView
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,8 +17,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,18 +33,21 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -46,12 +57,24 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
@@ -61,18 +84,25 @@ import com.antigravity.wrapper.data.BridgeStatus
 import com.antigravity.wrapper.ui.components.ChatDrawerSheet
 import com.antigravity.wrapper.ui.components.ChatMessageItem
 import com.antigravity.wrapper.ui.components.ChatTopBar
+import com.antigravity.wrapper.ui.components.DocumentViewerSheet
 import com.antigravity.wrapper.ui.components.EmptyChatWelcome
+import com.antigravity.wrapper.ui.components.FileDiffViewerSheet
 import com.antigravity.wrapper.ui.components.ModelSelectorSheet
+import com.antigravity.wrapper.ui.components.PermissionsSelectorSheet
+import com.antigravity.wrapper.ui.components.ProjectSelectorSheet
 import com.antigravity.wrapper.ui.components.PromptComposerBar
 import com.antigravity.wrapper.ui.components.QuickPromptsSheet
 import com.antigravity.wrapper.ui.components.SettingsFullScreen
 import com.antigravity.wrapper.ui.components.UsageQuotaSheet
+import com.antigravity.wrapper.ui.components.WorkspaceAndActionsSheet
 import com.antigravity.wrapper.ui.state.ChatViewModel
 import com.antigravity.wrapper.ui.theme.AntigravityTheme
 import com.antigravity.wrapper.ui.theme.isEffectiveDarkTheme
 import com.antigravity.wrapper.web.AntigravityWebChromeClient
 import com.antigravity.wrapper.web.AntigravityWebViewClient
 import com.antigravity.wrapper.web.DownloadHandler
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 @Composable
@@ -92,13 +122,37 @@ fun AntigravityNativeApp(
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val composerText by viewModel.composerText.collectAsStateWithLifecycle()
     val quickPrompts by viewModel.quickPrompts.collectAsStateWithLifecycle()
 
     val isDarkEffective = isEffectiveDarkTheme(settings.themeMode)
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    val listState = rememberLazyListState()
+    val displayedMessages = uiState.displayedMessages
+    val currentUrl = uiState.snapshot.currentUrl
+    val conversationKey = remember(currentUrl) {
+        currentUrl.substringBefore('?').substringBefore('#')
+    }
+    val hasOlderHeader = uiState.snapshot.hasOlderMessages && displayedMessages.isNotEmpty()
+    val listState = key(conversationKey) {
+        val initialIndex = if (displayedMessages.isNotEmpty()) {
+            displayedMessages.size + (if (hasOlderHeader) 1 else 0)
+        } else {
+            0
+        }
+        rememberLazyListState(initialFirstVisibleItemIndex = initialIndex)
+    }
+    var pendingPrependAnchorId by remember(conversationKey) { mutableStateOf<String?>(null) }
+    var pendingPrependAnchorOffset by remember(conversationKey) { mutableIntStateOf(0) }
+    var pendingPrependPrevCount by remember(conversationKey) { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    fun dismissKeyboardAndFocus() {
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+    }
 
     fun triggerHaptic() {
         if (settings.hapticFeedbackEnabled) {
@@ -124,8 +178,59 @@ fun AntigravityNativeApp(
         }
     }
 
+    fun openDiffReview(cardTitle: String = "") {
+        triggerHaptic()
+        dismissKeyboardAndFocus()
+        viewModel.openDiffReviewLoading(cardTitle.ifBlank { "Review Changes" })
+        bridgeEngine.openReviewDiffs(cardTitle) { diffData ->
+            viewModel.onDiffReviewLoaded(diffData)
+        }
+    }
+
+    fun openDocument(docTitle: String) {
+        triggerHaptic()
+        dismissKeyboardAndFocus()
+        viewModel.openDocumentLoading(docTitle)
+        bridgeEngine.openDocumentViewer(docTitle) { docData ->
+            viewModel.onDocumentLoaded(docData)
+        }
+    }
+
+    fun handleLinkClick(url: String) {
+        if (url.startsWith("ag-file://", ignoreCase = true)) {
+            val fileName = Uri.decode(url.removePrefix("ag-file://")).trim()
+            if (fileName.isNotEmpty()) {
+                openDocument(fileName)
+            }
+        } else {
+            onOpenExternalUrl(url)
+        }
+    }
+
+    fun isExternalArtifactLink(title: String, subtitle: String, url: String): Boolean {
+        if (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)) {
+            return true
+        }
+        val sub = subtitle.trim().lowercase()
+        if (sub.matches(Regex("^(?:[a-z0-9-]+\\.)+(?:com|org|net|io|dev|ai|app|co|edu|gov)(?:[\\s/·•].*)?$"))) {
+            return true
+        }
+        val trimmedTitle = title.trim()
+        if (trimmedTitle.matches(Regex("^v?\\d+\\.\\d+\\.\\d+(?:[-+].*)?$")) && (sub.isNotBlank() || url.isBlank())) {
+            return true
+        }
+        return false
+    }
+
+    fun openProjectSelector() {
+        triggerHaptic()
+        dismissKeyboardAndFocus()
+        viewModel.setProjectSheetOpen(true)
+        bridgeEngine.refreshProjects()
+    }
+
     fun sendCurrentPrompt(overrideText: String? = null) {
-        val textToSend = (overrideText ?: uiState.composerText).trim()
+        val textToSend = (overrideText ?: composerText).trim()
         if (textToSend.isEmpty()) return
         triggerHaptic()
         viewModel.addOptimisticUserMessage(textToSend)
@@ -140,6 +245,76 @@ fun AntigravityNativeApp(
     val showHeadlessWebForAuth = uiState.bridgeStatus == BridgeStatus.AUTH_REQUIRED
     val showWebOverlay = showHeadlessWebForAuth || settings.webInspectorMode
 
+    // Unfocus composer & hide keyboard ONLY once when the drawer transitions into opening/open.
+    // Avoids calling clearFocus() on every swipe frame and never mutates snapshot state inside snapshotFlow.
+    val density = LocalDensity.current
+    val drawerOpenThresholdPx = with(density) { 40.dp.toPx() }
+    LaunchedEffect(drawerState) {
+        var closedBaselineOffset = Float.NaN
+        snapshotFlow {
+            Triple(drawerState.currentValue, drawerState.targetValue, drawerState.currentOffset)
+        }
+            .map { (cur, target, offset) ->
+                if (cur == DrawerValue.Closed && target == DrawerValue.Closed && !offset.isNaN()) {
+                    if (closedBaselineOffset.isNaN() || kotlin.math.abs(offset - closedBaselineOffset) < 2f || offset < closedBaselineOffset) {
+                        closedBaselineOffset = offset
+                    }
+                }
+                cur == DrawerValue.Open ||
+                    target == DrawerValue.Open ||
+                    (!offset.isNaN() && !closedBaselineOffset.isNaN() && (offset - closedBaselineOffset) > drawerOpenThresholdPx)
+            }
+            .distinctUntilChanged()
+            .collect { shouldDismiss ->
+                if (shouldDismiss) {
+                    dismissKeyboardAndFocus()
+                }
+            }
+    }
+
+    LaunchedEffect(
+        uiState.isModelSheetOpen,
+        uiState.isQuotaSheetOpen,
+        uiState.isSettingsSheetOpen,
+        uiState.isQuickPromptsSheetOpen,
+        uiState.isWorkspaceSheetOpen,
+        uiState.isProjectSheetOpen,
+        uiState.isPermissionsSheetOpen,
+        uiState.diffReviewData != null,
+        uiState.documentViewerData != null,
+        showWebOverlay
+    ) {
+        if (uiState.isModelSheetOpen ||
+            uiState.isQuotaSheetOpen ||
+            uiState.isSettingsSheetOpen ||
+            uiState.isQuickPromptsSheetOpen ||
+            uiState.isWorkspaceSheetOpen ||
+            uiState.isProjectSheetOpen ||
+            uiState.isPermissionsSheetOpen ||
+            uiState.diffReviewData != null ||
+            uiState.documentViewerData != null ||
+            showWebOverlay
+        ) {
+            dismissKeyboardAndFocus()
+        }
+    }
+
+    BackHandler(
+        enabled = drawerState.isOpen &&
+            !showWebOverlay &&
+            !uiState.isSettingsSheetOpen &&
+            !uiState.isModelSheetOpen &&
+            !uiState.isQuotaSheetOpen &&
+            !uiState.isQuickPromptsSheetOpen &&
+            !uiState.isWorkspaceSheetOpen &&
+            !uiState.isProjectSheetOpen &&
+            !uiState.isPermissionsSheetOpen &&
+            uiState.diffReviewData == null &&
+            uiState.documentViewerData == null
+    ) {
+        scope.launch { drawerState.close() }
+    }
+
     LaunchedEffect(isDarkEffective) {
         onConfigureSystemBars(isDarkEffective)
     }
@@ -153,19 +328,42 @@ fun AntigravityNativeApp(
         onKeepScreenAwakeChanged(settings.keepScreenAwake && uiState.snapshot.isStreaming)
     }
 
-    val displayedMessages = uiState.displayedMessages
-    val currentUrl = uiState.snapshot.currentUrl
+    val bottomAnchorIndex = displayedMessages.size + (if (hasOlderHeader) 1 else 0)
+    val lastMessageSignature = displayedMessages.lastOrNull()?.let {
+        "${it.role}:${it.id}:${it.markdownContent.take(80)}:${it.artifacts.size}"
+    }
+    var seenLastMessageKey by remember(conversationKey) { mutableStateOf<String?>(null) }
 
-    // Scroll straight to the bottom anchor item so threads always open at the latest message
-    LaunchedEffect(currentUrl, displayedMessages.size) {
+    // Anchor viewport accurately on prepend ("Load earlier messages") and snap to bottom only for bottom appends / initial load.
+    LaunchedEffect(conversationKey, displayedMessages.size, lastMessageSignature, hasOlderHeader, uiState.isLoadingOlderMessages) {
+        val anchorId = pendingPrependAnchorId
+        if (anchorId != null) {
+            val anchorMsgIdx = displayedMessages.indexOfFirst { it.id == anchorId }
+            if (anchorMsgIdx >= 0) {
+                val targetIdx = anchorMsgIdx + (if (hasOlderHeader) 1 else 0)
+                listState.scrollToItem(targetIdx, pendingPrependAnchorOffset)
+            }
+            if (displayedMessages.size > pendingPrependPrevCount || !uiState.isLoadingOlderMessages) {
+                pendingPrependAnchorId = null
+            }
+            return@LaunchedEffect
+        }
+
         if (displayedMessages.isNotEmpty()) {
-            listState.scrollToItem(displayedMessages.size)
+            val tailKey = displayedMessages.lastOrNull()?.id
+            val isUserMessage = displayedMessages.lastOrNull()?.role == com.antigravity.wrapper.data.MessageRole.USER
+            val wasNearBottom = !listState.canScrollForward ||
+                (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= (bottomAnchorIndex - 2)
+            if (seenLastMessageKey == null || (tailKey != seenLastMessageKey && (wasNearBottom || isUserMessage))) {
+                listState.scrollToItem(bottomAnchorIndex)
+            }
+            seenLastMessageKey = tailKey
         }
     }
 
-    val showScrollToBottom by remember {
+    val showScrollToBottom by remember(listState) {
         derivedStateOf {
-            displayedMessages.isNotEmpty() && listState.canScrollForward
+            listState.layoutInfo.totalItemsCount > 0 && listState.canScrollForward
         }
     }
 
@@ -257,7 +455,15 @@ fun AntigravityNativeApp(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .navigationBarsPadding(),
+                        .then(
+                            if (showWebOverlay) {
+                                Modifier.navigationBarsPadding()
+                            } else {
+                                Modifier
+                                    .consumeWindowInsets(WindowInsets.ime)
+                                    .navigationBarsPadding()
+                            }
+                        ),
                     factory = { ctx ->
                         WebView(ctx).apply {
                             layoutParams = ViewGroup.LayoutParams(
@@ -299,14 +505,19 @@ fun AntigravityNativeApp(
                                 quota = uiState.snapshot.quota,
                                 onNewChat = {
                                     triggerHaptic()
+                                    dismissKeyboardAndFocus()
                                     scope.launch { drawerState.close() }
-                                    viewModel.clearOptimisticMessages()
+                                    viewModel.startNewChatOptimistic()
                                     bridgeEngine.startNewChat()
                                 },
                                 onSelectConversation = { conv ->
                                     triggerHaptic()
+                                    dismissKeyboardAndFocus()
                                     scope.launch { drawerState.close() }
-                                    if (!conv.isActive) {
+                                    val isAlreadyActive = conv.isActive ||
+                                        (conv.url.isNotBlank() && conv.url == currentUrl) ||
+                                        (conv.title.isNotBlank() && conv.title == uiState.snapshot.conversationTitle)
+                                    if (!isAlreadyActive) {
                                         viewModel.onStartConversationSwitch()
                                         bridgeEngine.selectConversation(conv.url, conv.title)
                                     }
@@ -317,50 +528,77 @@ fun AntigravityNativeApp(
                                 },
                                 onOpenQuota = {
                                     triggerHaptic()
+                                    dismissKeyboardAndFocus()
                                     scope.launch { drawerState.close() }
                                     viewModel.setQuotaSheetOpen(true)
                                 },
                                 onOpenSettings = {
                                     triggerHaptic()
+                                    dismissKeyboardAndFocus()
                                     scope.launch { drawerState.close() }
                                     viewModel.setSettingsSheetOpen(true)
                                 }
                             )
                         }
                     ) {
+                        val isNewChat = displayedMessages.isEmpty() &&
+                            !uiState.isSwitchingConversation &&
+                            uiState.bridgeStatus != BridgeStatus.OFFLINE &&
+                            uiState.bridgeStatus != BridgeStatus.ERROR
+
                         Scaffold(
                             containerColor = MaterialTheme.colorScheme.background,
                             topBar = {
                                 ChatTopBar(
                                     conversationTitle = uiState.snapshot.conversationTitle,
-                                    activeProject = uiState.snapshot.activeProject,
+                                    activeProject = uiState.activeProjectLabel,
+                                    isNewChat = isNewChat,
                                     bridgeStatus = uiState.bridgeStatus,
-                                    quotaUsedPercent = uiState.snapshot.quota.usedPercent,
+                                    quotaLeftPercent = uiState.snapshot.quota.headlineLeftPercent,
                                     onOpenDrawer = {
                                         triggerHaptic()
+                                        dismissKeyboardAndFocus()
                                         scope.launch { drawerState.open() }
                                     },
                                     onOpenQuotaSheet = {
                                         triggerHaptic()
+                                        dismissKeyboardAndFocus()
                                         viewModel.setQuotaSheetOpen(true)
                                     },
                                     onNewChat = {
                                         triggerHaptic()
-                                        viewModel.clearOptimisticMessages()
+                                        dismissKeyboardAndFocus()
+                                        viewModel.startNewChatOptimistic()
                                         bridgeEngine.startNewChat()
+                                    },
+                                    onOpenWorkspaceSheet = {
+                                        triggerHaptic()
+                                        dismissKeyboardAndFocus()
+                                        viewModel.setWorkspaceSheetOpen(true)
+                                        viewModel.onStartWorkspaceArtifactsLoad()
+                                        bridgeEngine.fetchWorkspaceOverview { items ->
+                                            viewModel.onWorkspaceArtifactsLoaded(items)
+                                        }
                                     }
                                 )
                             },
                             bottomBar = {
                                 PromptComposerBar(
-                                    text = uiState.composerText,
+                                    text = composerText,
+                                    activeProjectLabel = uiState.activeProjectLabel,
                                     activeModelLabel = if (uiState.isSwitchingConversation) {
                                         "Syncing…"
                                     } else {
                                         uiState.activeModelLabel
                                     },
+                                    showNewChatContextRow = isNewChat,
                                     isStreaming = uiState.snapshot.isStreaming,
                                     isConnected = uiState.bridgeStatus == BridgeStatus.CONNECTED,
+                                    containerColor = if (isNewChat) {
+                                        MaterialTheme.colorScheme.surfaceContainerLowest
+                                    } else {
+                                        MaterialTheme.colorScheme.background
+                                    },
                                     onTextChange = { viewModel.updateComposerText(it) },
                                     onSend = { sendCurrentPrompt() },
                                     onStop = {
@@ -369,20 +607,22 @@ fun AntigravityNativeApp(
                                     },
                                     onAttachClick = {
                                         triggerHaptic()
-                                        bridgeEngine.triggerFileUpload()
+                                        bridgeEngine.triggerFileUpload { ok, reason ->
+                                            if (!ok && reason.isNotBlank()) {
+                                                showToast(reason)
+                                            }
+                                        }
                                     },
                                     onOpenModelSelector = {
                                         triggerHaptic()
+                                        dismissKeyboardAndFocus()
                                         viewModel.setModelSheetOpen(true)
                                         if (uiState.snapshot.models.size <= 1) {
                                             viewModel.onStartModelRefresh()
                                             bridgeEngine.refreshModels()
                                         }
                                     },
-                                    onOpenQuickPrompts = {
-                                        triggerHaptic()
-                                        viewModel.setQuickPromptsSheetOpen(true)
-                                    }
+                                    onOpenProjectSelector = { openProjectSelector() }
                                 )
                             }
                         ) { innerPadding ->
@@ -394,12 +634,19 @@ fun AntigravityNativeApp(
                                 if (displayedMessages.isEmpty()) {
                                     EmptyChatWelcome(
                                         bridgeStatus = uiState.bridgeStatus,
+                                        activeProjectLabel = uiState.activeProjectLabel,
                                         activeModelLabel = uiState.activeModelLabel,
                                         isSwitchingConversation = uiState.isSwitchingConversation,
                                         errorMessage = uiState.errorMessage,
-                                        onSuggestionClick = { suggestion ->
+                                        onOpenProjectSelector = { openProjectSelector() },
+                                        onOpenModelSelector = {
                                             triggerHaptic()
-                                            viewModel.updateComposerText(suggestion)
+                                            dismissKeyboardAndFocus()
+                                            viewModel.setModelSheetOpen(true)
+                                            if (uiState.snapshot.models.size <= 1) {
+                                                viewModel.onStartModelRefresh()
+                                                bridgeEngine.refreshModels()
+                                            }
                                         },
                                         onRetryConnect = {
                                             triggerHaptic()
@@ -408,16 +655,79 @@ fun AntigravityNativeApp(
                                         },
                                         onOpenSettings = {
                                             triggerHaptic()
+                                            dismissKeyboardAndFocus()
                                             viewModel.setSettingsSheetOpen(true)
                                         }
                                     )
                                 } else {
                                     LazyColumn(
                                         state = listState,
-                                        contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp),
+                                        contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp),
                                         verticalArrangement = Arrangement.spacedBy(10.dp),
                                         modifier = Modifier.fillMaxSize()
                                     ) {
+                                        if (hasOlderHeader) {
+                                            item(key = "load_older_header") {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(vertical = 4.dp),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Surface(
+                                                        onClick = {
+                                                            if (!uiState.isLoadingOlderMessages) {
+                                                                triggerHaptic()
+                                                                val anchorItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                                                    val k = info.key as? String
+                                                                    k != null && k != "load_older_header" && k != "bottom_anchor"
+                                                                }
+                                                                pendingPrependAnchorId = anchorItem?.key as? String
+                                                                pendingPrependAnchorOffset = anchorItem?.offset ?: 0
+                                                                pendingPrependPrevCount = displayedMessages.size
+                                                                viewModel.onStartLoadOlderMessages()
+                                                                bridgeEngine.loadOlderMessages()
+                                                            }
+                                                        },
+                                                        shape = RoundedCornerShape(999.dp),
+                                                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                                        border = BorderStroke(
+                                                            1.dp,
+                                                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)
+                                                        )
+                                                    ) {
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                                        ) {
+                                                            if (uiState.isLoadingOlderMessages) {
+                                                                CircularProgressIndicator(
+                                                                    strokeWidth = 2.dp,
+                                                                    modifier = Modifier.size(14.dp)
+                                                                )
+                                                            } else {
+                                                                Icon(
+                                                                    imageVector = Icons.Rounded.History,
+                                                                    contentDescription = null,
+                                                                    tint = MaterialTheme.colorScheme.primary,
+                                                                    modifier = Modifier.size(15.dp)
+                                                                )
+                                                            }
+                                                            Spacer(modifier = Modifier.width(8.dp))
+                                                            Text(
+                                                                text = if (uiState.isLoadingOlderMessages) {
+                                                                    "Loading earlier messages…"
+                                                                } else {
+                                                                    "Load earlier messages"
+                                                                },
+                                                                style = MaterialTheme.typography.labelMedium,
+                                                                color = MaterialTheme.colorScheme.onSurface
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                         items(displayedMessages, key = { it.id }) { message ->
                                             ChatMessageItem(
                                                 message = message,
@@ -428,6 +738,9 @@ fun AntigravityNativeApp(
                                                     triggerHaptic()
                                                     viewModel.toggleReasoningBlock(blockId, defaultExpanded)
                                                 },
+                                                onExpandReasoningContent = { blockId, blockTitle ->
+                                                    bridgeEngine.expandReasoningBlock(blockId, blockTitle)
+                                                },
                                                 onCopyText = { text ->
                                                     triggerHaptic()
                                                     onCopyToClipboard("Antigravity", text)
@@ -437,8 +750,28 @@ fun AntigravityNativeApp(
                                                     triggerHaptic()
                                                     onShareText(text)
                                                 },
-                                                onLinkClick = { url ->
-                                                    onOpenExternalUrl(url)
+                                                onLinkClick = { url -> handleLinkClick(url) },
+                                                onArtifactClick = { artifact ->
+                                                    val isDiffCard = artifact.addedLines != null ||
+                                                        artifact.actionLabel.equals("Review", ignoreCase = true) ||
+                                                        artifact.title.contains("files changed", ignoreCase = true) ||
+                                                        artifact.title.contains("file changed", ignoreCase = true)
+                                                    val isExternal = !isDiffCard && isExternalArtifactLink(
+                                                        title = artifact.title,
+                                                        subtitle = artifact.subtitle,
+                                                        url = artifact.url
+                                                    )
+                                                    when {
+                                                        isDiffCard -> openDiffReview(artifact.title)
+                                                        artifact.url.startsWith("http", ignoreCase = true) -> {
+                                                            onOpenExternalUrl(artifact.url)
+                                                        }
+                                                        isExternal -> {
+                                                            triggerHaptic()
+                                                            bridgeEngine.openExternalArtifact(artifact.title)
+                                                        }
+                                                        else -> openDocument(artifact.title)
+                                                    }
                                                 }
                                             )
                                         }
@@ -447,32 +780,75 @@ fun AntigravityNativeApp(
                                         }
                                     }
 
-                                    // Floating Scroll-to-Bottom button whenever any content sits below viewport
+                                    // Bottom fade scrim + compact centered jump-to-bottom pill when scrolled up (never obscures right-edge message text)
                                     androidx.compose.animation.AnimatedVisibility(
                                         visible = showScrollToBottom,
                                         enter = fadeIn(),
                                         exit = fadeOut(),
                                         modifier = Modifier
-                                            .align(Alignment.BottomEnd)
-                                            .padding(end = 16.dp, bottom = 12.dp)
+                                            .align(Alignment.BottomCenter)
+                                            .fillMaxWidth()
                                     ) {
-                                        SmallFloatingActionButton(
-                                            onClick = {
-                                                triggerHaptic()
-                                                scope.launch {
-                                                    listState.animateScrollToItem(displayedMessages.size)
-                                                }
-                                            },
-                                            shape = CircleShape,
-                                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                            contentColor = MaterialTheme.colorScheme.onSurface
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(54.dp)
+                                                .background(
+                                                    Brush.verticalGradient(
+                                                        colors = listOf(
+                                                            Color.Transparent,
+                                                            MaterialTheme.colorScheme.background.copy(alpha = 0.88f)
+                                                        )
+                                                    )
+                                                )
+                                                .padding(bottom = 10.dp),
+                                            contentAlignment = Alignment.BottomCenter
                                         ) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.KeyboardArrowDown,
-                                                contentDescription = "Scroll to bottom"
-                                            )
+                                            Surface(
+                                                onClick = {
+                                                    triggerHaptic()
+                                                    scope.launch {
+                                                        listState.animateScrollToItem(bottomAnchorIndex)
+                                                    }
+                                                },
+                                                shape = CircleShape,
+                                                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                                contentColor = MaterialTheme.colorScheme.onSurface,
+                                                border = BorderStroke(
+                                                    width = 1.dp,
+                                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)
+                                                ),
+                                                shadowElevation = 4.dp,
+                                                modifier = Modifier.size(36.dp)
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(
+                                                        imageVector = Icons.Rounded.KeyboardArrowDown,
+                                                        contentDescription = "Scroll to bottom",
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
+                                }
+
+                                // Left-edge system gesture exclusion band so edge swipe opens drawer instead of triggering System Back
+                                if (!drawerState.isOpen) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.CenterStart)
+                                            .width(32.dp)
+                                            .fillMaxHeight(0.75f)
+                                            .systemGestureExclusion { coords ->
+                                                Rect(
+                                                    left = 0f,
+                                                    top = 0f,
+                                                    right = coords.size.width.toFloat(),
+                                                    bottom = coords.size.height.toFloat()
+                                                )
+                                            }
+                                    )
                                 }
 
                                 // Dark-themed Snackbar positioned cleanly above the composer bar
@@ -551,6 +927,105 @@ fun AntigravityNativeApp(
                                 viewModel.removeQuickPrompt(id)
                             },
                             onDismiss = { viewModel.setQuickPromptsSheetOpen(false) }
+                        )
+                    }
+
+                    // Native Workspace & Thread Actions Bottom Sheet
+                    if (uiState.isWorkspaceSheetOpen) {
+                        WorkspaceAndActionsSheet(
+                            conversationTitle = uiState.snapshot.conversationTitle,
+                            permissionsPreset = uiState.snapshot.permissionsPreset,
+                            artifacts = uiState.workspaceArtifacts,
+                            isLoadingArtifacts = uiState.isLoadingWorkspaceArtifacts,
+                            hasSidePanel = uiState.snapshot.hasSidePanel,
+                            onOpenDiffs = { openDiffReview() },
+                            onOpenArtifact = { item ->
+                                when {
+                                    item.url.startsWith("http", ignoreCase = true) -> {
+                                        onOpenExternalUrl(item.url)
+                                    }
+                                    isExternalArtifactLink(item.title, item.subtitle, item.url) -> {
+                                        triggerHaptic()
+                                        bridgeEngine.openExternalArtifact(item.title)
+                                    }
+                                    else -> openDocument(item.title)
+                                }
+                            },
+                            onOpenPermissions = {
+                                triggerHaptic()
+                                viewModel.setPermissionsSheetOpen(true)
+                            },
+                            onRenameThread = { newTitle ->
+                                triggerHaptic()
+                                bridgeEngine.runThreadAction("rename", newTitle)
+                                showToast("Renaming conversation…")
+                            },
+                            onPinThread = {
+                                triggerHaptic()
+                                bridgeEngine.runThreadAction("pin")
+                                showToast("Updated pin state")
+                            },
+                            onArchiveThread = {
+                                triggerHaptic()
+                                bridgeEngine.runThreadAction("archive")
+                                showToast("Conversation archived")
+                            },
+                            onDismiss = { viewModel.setWorkspaceSheetOpen(false) }
+                        )
+                    }
+
+                    // Native Project Selector Bottom Sheet
+                    if (uiState.isProjectSheetOpen) {
+                        ProjectSelectorSheet(
+                            projects = uiState.snapshot.projects,
+                            activeProject = uiState.activeProjectLabel,
+                            onSelectProject = { projectName ->
+                                triggerHaptic()
+                                bridgeEngine.selectProject(projectName)
+                                showToast("Project: $projectName")
+                            },
+                            onDismiss = { viewModel.setProjectSheetOpen(false) }
+                        )
+                    }
+
+                    // Native Remote Permissions Selector Bottom Sheet
+                    if (uiState.isPermissionsSheetOpen) {
+                        PermissionsSelectorSheet(
+                            currentPreset = uiState.snapshot.permissionsPreset,
+                            onSelectPreset = { preset ->
+                                triggerHaptic()
+                                bridgeEngine.selectPermissions(preset)
+                                showToast("Permissions: $preset")
+                            },
+                            onDismiss = { viewModel.setPermissionsSheetOpen(false) }
+                        )
+                    }
+
+                    // Native File Diff Viewer Sheet
+                    uiState.diffReviewData?.let { diffData ->
+                        FileDiffViewerSheet(
+                            data = diffData,
+                            onRefresh = { openDiffReview(diffData.title) },
+                            onDismiss = { viewModel.closeDiffReview() }
+                        )
+                    }
+
+                    // Native Document / Artifact Viewer Sheet
+                    uiState.documentViewerData?.let { docData ->
+                        DocumentViewerSheet(
+                            data = docData,
+                            fontScale = fontScale,
+                            onCopyText = { text ->
+                                triggerHaptic()
+                                onCopyToClipboard(docData.title.ifBlank { "Document" }, text)
+                                showToast("Copied to clipboard")
+                            },
+                            onShareText = { text ->
+                                triggerHaptic()
+                                onShareText(text)
+                            },
+                            onLinkClick = { url -> handleLinkClick(url) },
+                            onDismiss = { viewModel.closeDocumentViewer() }
                         )
                     }
                 }

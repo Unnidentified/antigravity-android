@@ -1,17 +1,26 @@
 package com.antigravity.wrapper.ui.markdown
 
+import androidx.compose.runtime.Immutable
+
+@Immutable
 sealed interface LatexNode {
-    data class Row(val children: List<LatexNode>) : LatexNode
-    data class Text(val value: String, val italic: Boolean = false, val bold: Boolean = false) : LatexNode
-    data class Fraction(val numerator: LatexNode, val denominator: LatexNode) : LatexNode
-    data class Sqrt(val index: LatexNode?, val body: LatexNode) : LatexNode
-    data class Script(val base: LatexNode, val superscript: LatexNode?, val subscript: LatexNode?) : LatexNode
-    data class Matrix(
+    @Immutable data class Row(val children: List<LatexNode>) : LatexNode
+    @Immutable data class Text(val value: String, val italic: Boolean = false, val bold: Boolean = false) : LatexNode
+    @Immutable data class Fraction(val numerator: LatexNode, val denominator: LatexNode) : LatexNode
+    @Immutable data class Sqrt(val index: LatexNode?, val body: LatexNode) : LatexNode
+    @Immutable data class Script(val base: LatexNode, val superscript: LatexNode?, val subscript: LatexNode?) : LatexNode
+    @Immutable data class Matrix(
         val leftDelim: String,
         val rightDelim: String,
-        val rows: List<List<LatexNode>>
+        val rows: List<List<LatexNode>>,
+        val isAligned: Boolean = false
     ) : LatexNode
-    data class OverAccent(val accent: String, val body: LatexNode) : LatexNode
+    @Immutable data class OverAccent(val accent: String, val body: LatexNode) : LatexNode
+    @Immutable data class Stacked(
+        val body: LatexNode,
+        val above: LatexNode? = null,
+        val below: LatexNode? = null
+    ) : LatexNode
 }
 
 /**
@@ -20,11 +29,25 @@ sealed interface LatexNode {
  */
 object LatexParser {
 
+    private val parseCache = object : LinkedHashMap<String, LatexNode>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LatexNode>?): Boolean {
+            return size > 128
+        }
+    }
+
     fun parse(input: String): LatexNode {
         val cleaned = input.trim()
         if (cleaned.isEmpty()) return LatexNode.Text("")
-        val parser = Parser(cleaned)
-        return parser.parseSequence(stopTokens = emptySet())
+        synchronized(parseCache) {
+            parseCache[cleaned]?.let { return it }
+        }
+        val parsed = Parser(cleaned).parseSequence(stopTokens = emptySet())
+        if (cleaned.length <= 2_000) {
+            synchronized(parseCache) {
+                parseCache[cleaned] = parsed
+            }
+        }
+        return parsed
     }
 
     private class Parser(private val src: String) {
@@ -166,12 +189,22 @@ object LatexParser {
                     val den = parseArgument()
                     LatexNode.Fraction(num, den)
                 }
+                "binom", "tbinom", "dbinom" -> {
+                    val top = parseArgument()
+                    val bot = parseArgument()
+                    LatexNode.Matrix(
+                        leftDelim = "(",
+                        rightDelim = ")",
+                        rows = listOf(listOf(top), listOf(bot)),
+                        isAligned = false
+                    )
+                }
                 "sqrt" -> {
                     val idx = parseOptionalBracket()
                     val body = parseArgument()
                     LatexNode.Sqrt(idx, body)
                 }
-                "text", "textrm", "mathrm", "operatorname", "mbox", "mathsf", "mathtt" -> {
+                "text", "textrm", "mathrm", "operatorname", "mbox", "mathsf", "mathtt", "mathcal", "mathfrak" -> {
                     val rawText = parseRawBracedText()
                     LatexNode.Text(rawText, italic = false)
                 }
@@ -183,6 +216,16 @@ object LatexParser {
                     val rawText = parseRawBracedText()
                     val mapped = rawText.map { BLACKBOARD_MAP[it] ?: it.toString() }.joinToString("")
                     LatexNode.Text(mapped, italic = false, bold = true)
+                }
+                "overset" -> {
+                    val above = parseArgument()
+                    val body = parseArgument()
+                    LatexNode.Stacked(body = body, above = above)
+                }
+                "underset" -> {
+                    val below = parseArgument()
+                    val body = parseArgument()
+                    LatexNode.Stacked(body = body, below = below)
                 }
                 "hat", "widehat" -> LatexNode.OverAccent("^", parseArgument())
                 "bar", "overline" -> LatexNode.OverAccent("¯", parseArgument())
@@ -260,6 +303,7 @@ object LatexParser {
                 row.split("&").map { cell -> parse(cell.trim()) }
             }
 
+            val isAlignedEnv = envName in setOf("aligned", "align", "align*", "gather", "gather*", "split", "eqnarray")
             val (left, right) = when (envName) {
                 "pmatrix" -> "(" to ")"
                 "bmatrix" -> "[" to "]"
@@ -270,7 +314,7 @@ object LatexParser {
                 else -> "" to ""
             }
 
-            return LatexNode.Matrix(left, right, parsedRows)
+            return LatexNode.Matrix(left, right, parsedRows, isAligned = isAlignedEnv || envName == "cases")
         }
 
         private fun skipWhitespace() {
@@ -306,7 +350,7 @@ object LatexParser {
         "int" to "∫", "iint" to "∬", "iiint" to "∭", "oint" to "∮",
         "infty" to "∞", "partial" to "∂", "nabla" to "∇",
         "pm" to " ± ", "mp" to " ∓ ", "times" to " × ", "div" to " ÷ ",
-        "cdot" to " · ", "cdots" to "⋯", "ldots" to "…", "dots" to "…", "vdots" to "⋮",
+        "cdot" to " · ", "cdots" to "⋯", "dotsb" to "⋯", "ldots" to "…", "dots" to "…", "vdots" to "⋮", "ddots" to "⋱",
         "star" to "⋆", "circ" to "∘", "bullet" to "•", "oplus" to " ⊕ ", "otimes" to " ⊗ ",
         // Relations
         "leq" to " ≤ ", "le" to " ≤ ", "geq" to " ≥ ", "ge" to " ≥ ",
