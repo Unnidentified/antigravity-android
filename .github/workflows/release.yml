@@ -72,19 +72,6 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          NOTES="End-to-end native Jetpack Compose & Material 3 build of Antigravity for Android (${TAG}).
-
-          ### Highlights
-          - 100% native chat interface (zero browser chrome or visible web UI during normal use) backed by a headless session bridge
-          - Native chat menu drawer with New Chat, conversation search, and synced conversations
-          - Native prompt input bar with attachments, clickable Model Selector sheet, Quick Prompts, and Send/Stop controls
-          - Native Usage & Quota ring indicator and bottom sheet
-          - Collapsible & expandable reasoning/thought cards
-          - Native Markdown + syntax-highlighted code blocks + native Compose LaTeX math renderer (fractions, roots, scripts, matrices)
-          - Settings with System/Dark/AMOLED/Light + Material You themes and 1-tap Sanitized DOM Snapshot exporter for bridge calibration
-
-          Built and verified automatically via GitHub Actions (\`./gradlew testDebugUnitTest assembleDebug\`)."
-
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/antigravity-debug.apk --clobber
           else
@@ -92,5 +79,5 @@ jobs:
               --target main \
               $PRERELEASE_FLAG \
               --title "Antigravity ${TAG}" \
-              --notes "$NOTES"
+              --generate-notes
           fi
