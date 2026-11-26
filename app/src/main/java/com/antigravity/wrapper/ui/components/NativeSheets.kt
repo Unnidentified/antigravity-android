@@ -2,6 +2,15 @@ package com.antigravity.wrapper.ui.components
 
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -17,17 +26,24 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.SheetValue
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import kotlinx.coroutines.delay
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
@@ -53,13 +69,17 @@ import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -86,10 +106,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
@@ -100,6 +117,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.antigravity.wrapper.BuildConfig
 import com.antigravity.wrapper.data.AppSettings
 import com.antigravity.wrapper.data.BridgeStatus
@@ -109,6 +127,28 @@ import com.antigravity.wrapper.data.QuotaInfo
 import com.antigravity.wrapper.data.QuotaLimitItem
 import com.antigravity.wrapper.data.ThemeMode
 import kotlin.math.roundToInt
+
+private val MODEL_EFFORT_SUFFIX_REGEX =
+    Regex("(?:\\s*\\((?:Minimal|Low|Medium|High|Extra|Fast)\\)|\\s+(?:Minimal|Low|Medium|High|Extra))$", RegexOption.IGNORE_CASE)
+
+private fun normalizeModelLabel(raw: String): String =
+    raw.trim().replace(Regex("\\s+"), " ")
+
+internal fun matchesActiveModelLabel(modelName: String, activeModelLabel: String): Boolean {
+    val target = normalizeModelLabel(modelName)
+    val active = normalizeModelLabel(activeModelLabel)
+    if (target.isEmpty() || active.isEmpty()) return false
+    if (active.equals(target, ignoreCase = true)) return true
+    val strippedActive = MODEL_EFFORT_SUFFIX_REGEX.replace(active, "").trim()
+    val strippedTarget = MODEL_EFFORT_SUFFIX_REGEX.replace(target, "").trim()
+    return strippedActive.equals(target, ignoreCase = true) ||
+        (strippedActive.isNotEmpty() && strippedActive.equals(strippedTarget, ignoreCase = true))
+}
+
+internal fun resolveSelectedModel(models: List<ModelOption>, activeModelLabel: String): ModelOption? {
+    return models.firstOrNull { it.isSelected }
+        ?: models.firstOrNull { matchesActiveModelLabel(it.name, activeModelLabel) }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -121,15 +161,24 @@ fun ModelSelectorSheet(
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val effortLevels = listOf("Low", "Medium", "High", "Extra")
+    val hasExplicitSelection = remember(models) { models.any { it.isSelected } }
     val activeModelObj = remember(models, activeModelLabel) {
-        models.firstOrNull { it.isSelected || activeModelLabel.startsWith(it.name, ignoreCase = true) }
+        resolveSelectedModel(models, activeModelLabel)
     }
-    val supportedEfforts = remember(activeModelObj) {
+    val defaultEffortLevels = listOf("Low", "Medium", "High", "Extra")
+    val effortLevels = remember(activeModelObj) {
+        val opts = activeModelObj?.effortOptions.orEmpty()
+        if (opts.any { it.equals("Minimal", ignoreCase = true) }) {
+            listOf("Minimal", "Low", "Medium", "High", "Extra")
+        } else {
+            defaultEffortLevels
+        }
+    }
+    val supportedEfforts = remember(activeModelObj, effortLevels) {
         activeModelObj?.effortOptions?.takeIf { it.isNotEmpty() } ?: effortLevels
     }
     val activeEffort = remember(activeModelLabel, supportedEfforts) {
-        val extracted = Regex("\\b(Low|Medium|High|Extra)\\b", RegexOption.IGNORE_CASE)
+        val extracted = Regex("\\b(Minimal|Low|Medium|High|Extra|Fast)\\b", RegexOption.IGNORE_CASE)
             .find(activeModelLabel)?.groupValues?.get(1) ?: "High"
         if (supportedEfforts.any { it.equals(extracted, ignoreCase = true) }) {
             extracted
@@ -146,12 +195,14 @@ fun ModelSelectorSheet(
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         tonalElevation = 0.dp,
         scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets.navigationBars }
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .navigationBarsPadding()
+                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
         ) {
@@ -306,20 +357,27 @@ fun ModelSelectorSheet(
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(
+                    LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .verticalScroll(rememberScrollState())
+                            .heightIn(max = 420.dp)
                     ) {
-                        models.forEachIndexed { index, model ->
+                        itemsIndexed(
+                            items = models,
+                            key = { _, model -> model.id },
+                            contentType = { _, _ -> "model_row" }
+                        ) { index, model ->
                             if (index > 0) {
                                 HorizontalDivider(
                                     color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                                     modifier = Modifier.padding(horizontal = 14.dp)
                                 )
                             }
-                            val selected = model.isSelected ||
-                                activeModelLabel.startsWith(model.name, ignoreCase = true)
+                            val selected = if (hasExplicitSelection) {
+                                model.isSelected
+                            } else {
+                                matchesActiveModelLabel(model.name, activeModelLabel)
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -404,9 +462,10 @@ fun UsageQuotaSheet(
     val primaryColor = MaterialTheme.colorScheme.primary
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
 
-    // Auto-load usage once on open when live usage hasn't been fetched yet
+    // Auto-load usage after sheet open animation finishes so the slide-up stays jank-free
     LaunchedEffect(Unit) {
         if (!quota.isLiveFromServer && !isRefreshing && bridgeStatus == BridgeStatus.CONNECTED) {
+            delay(220L)
             onRefresh()
         }
     }
@@ -417,13 +476,15 @@ fun UsageQuotaSheet(
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         tonalElevation = 0.dp,
         scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets.navigationBars }
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
+                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
         ) {
@@ -487,14 +548,6 @@ fun UsageQuotaSheet(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            val density = LocalDensity.current
-            val ringStroke = remember(density) {
-                with(density) { Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round) }
-            }
-            val smallRingStroke = remember(density) {
-                with(density) { Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round) }
-            }
-
             if (quota.limits.isNotEmpty()) {
                 val grouped = remember(quota.limits) {
                     quota.limits.groupBy { normalizeQuotaGroupTitle(it.groupName.ifBlank { quota.planLabel }) }
@@ -525,7 +578,6 @@ fun UsageQuotaSheet(
                                     }
                                     QuotaLimitRow(
                                         item = item,
-                                        ringStroke = smallRingStroke,
                                         trackColor = trackColor,
                                         fallbackColor = primaryColor
                                     )
@@ -552,41 +604,12 @@ fun UsageQuotaSheet(
                             contentDescription = quotaAccessibilitySummary
                         }
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (headlinePct != null) {
-                            val ringColor = quotaRingColor(headlinePct, primaryColor)
-                            Box(
-                                modifier = Modifier.size(56.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Canvas(modifier = Modifier.size(52.dp)) {
-                                    drawArc(
-                                        color = trackColor,
-                                        startAngle = 0f,
-                                        sweepAngle = 360f,
-                                        useCenter = false,
-                                        style = ringStroke
-                                    )
-                                    drawArc(
-                                        color = ringColor,
-                                        startAngle = -90f,
-                                        sweepAngle = (headlinePct / 100f).coerceIn(0.03f, 1f) * 360f,
-                                        useCenter = false,
-                                        style = ringStroke
-                                    )
-                                }
-                                Text(
-                                    text = "${headlinePct.toInt()}%",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Box(
                                 modifier = Modifier
                                     .size(42.dp)
@@ -608,42 +631,52 @@ fun UsageQuotaSheet(
                                     )
                                 }
                             }
-                        }
 
-                        Spacer(modifier = Modifier.width(14.dp))
+                            Spacer(modifier = Modifier.width(14.dp))
 
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = quota.planLabel,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = when {
-                                    isRefreshing -> "Checking live quota…"
-                                    quota.remainingLabel.isNotBlank() -> quota.remainingLabel
-                                    else -> "Tap Refresh above to sync 5h & weekly limits"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (quota.resetLabel.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(4.dp))
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = quota.resetLabel,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
+                                    text = quota.planLabel,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = when {
+                                        isRefreshing -> "Checking live quota…"
+                                        quota.remainingLabel.isNotBlank() -> quota.remainingLabel
+                                        else -> "Tap Refresh above to sync 5h & weekly limits"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (quota.resetLabel.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = quota.resetLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (headlinePct != null) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    SharpQuotaProgressBar(
+                                        leftPercent = headlinePct,
+                                        barHeight = 9.dp,
+                                        textSize = 13.sp,
+                                        trackColor = trackColor,
+                                        fillColor = primaryColor,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
                             }
                         }
-                    }
                 }
             }
 
@@ -728,7 +761,6 @@ fun UsageQuotaSheet(
 @Composable
 private fun QuotaLimitRow(
     item: QuotaLimitItem,
-    ringStroke: Stroke,
     trackColor: Color,
     fallbackColor: Color
 ) {
@@ -763,32 +795,16 @@ private fun QuotaLimitRow(
                 )
             }
         }
-        Spacer(modifier = Modifier.width(12.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (pct != null) {
-                Text(
-                    text = "${pct.toInt()}% left",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Canvas(modifier = Modifier.size(22.dp)) {
-                    drawArc(
-                        color = trackColor,
-                        startAngle = 0f,
-                        sweepAngle = 360f,
-                        useCenter = false,
-                        style = ringStroke
-                    )
-                    drawArc(
-                        color = ringColor,
-                        startAngle = -90f,
-                        sweepAngle = (pct / 100f).coerceIn(0.04f, 1f) * 360f,
-                        useCenter = false,
-                        style = ringStroke
-                    )
-                }
-            }
+        if (pct != null) {
+            Spacer(modifier = Modifier.width(12.dp))
+            SharpQuotaProgressBar(
+                leftPercent = pct,
+                barWidth = 88.dp,
+                barHeight = 9.dp,
+                textSize = 13.sp,
+                trackColor = trackColor,
+                fillColor = ringColor
+            )
         }
     }
 }
@@ -862,13 +878,14 @@ fun QuickPromptsSheet(
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         tonalElevation = 0.dp,
         scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets.navigationBars }
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
         ) {
@@ -900,8 +917,17 @@ fun QuickPromptsSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                prompts.forEach { prompt ->
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(
+                    items = prompts,
+                    key = { it.id },
+                    contentType = { "prompt_row" }
+                ) { prompt ->
                     Surface(
                         onClick = {
                             onSelectPrompt(prompt)
@@ -1061,52 +1087,96 @@ fun SettingsFullScreen(
                         color = MaterialTheme.colorScheme.primary
                     )
                     Spacer(modifier = Modifier.height(10.dp))
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    var themeDropdownExpanded by remember { mutableStateOf(false) }
+                    ExposedDropdownMenuBox(
+                        expanded = themeDropdownExpanded,
+                        onExpandedChange = { themeDropdownExpanded = !themeDropdownExpanded },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(
+                        OutlinedTextField(
+                            value = settings.themeMode.label,
+                            onValueChange = {},
+                            readOnly = true,
+                            singleLine = true,
+                            label = { Text("Theme") },
+                            leadingIcon = {
+                                Box(
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(settings.themeMode.swatchArgb))
+                                        .border(
+                                            width = 1.dp,
+                                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                                            shape = CircleShape
+                                        )
+                                )
+                            },
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = themeDropdownExpanded)
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
                             modifier = Modifier
+                                .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true)
                                 .fillMaxWidth()
-                                .padding(4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        )
+                        ExposedDropdownMenu(
+                            expanded = themeDropdownExpanded,
+                            onDismissRequest = { themeDropdownExpanded = false },
+                            modifier = Modifier.heightIn(max = 360.dp)
                         ) {
                             ThemeMode.entries.forEach { mode ->
-                                val isSelected = settings.themeMode == mode
-                                Surface(
-                                    onClick = { onThemeModeChange(mode) },
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = if (isSelected) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        Color.Transparent
-                                    },
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Box(
-                                        contentAlignment = Alignment.Center,
-                                        modifier = Modifier.padding(vertical = 8.dp, horizontal = 2.dp)
-                                    ) {
+                                val selected = mode == settings.themeMode
+                                DropdownMenuItem(
+                                    text = {
                                         Text(
                                             text = mode.label,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = if (isSelected) {
-                                                MaterialTheme.colorScheme.onPrimary
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                                            ),
+                                            color = if (selected) {
+                                                MaterialTheme.colorScheme.primary
                                             } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            },
-                                            maxLines = 1,
-                                            softWrap = false,
-                                            overflow = TextOverflow.Ellipsis
+                                                MaterialTheme.colorScheme.onSurface
+                                            }
                                         )
+                                    },
+                                    leadingIcon = {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(14.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(mode.swatchArgb))
+                                                .border(
+                                                    width = 1.dp,
+                                                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.65f),
+                                                    shape = CircleShape
+                                                )
+                                        )
+                                    },
+                                    trailingIcon = if (selected) {
+                                        {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Check,
+                                                contentDescription = "Selected",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    onClick = {
+                                        onThemeModeChange(mode)
+                                        themeDropdownExpanded = false
                                     }
-                                }
+                                )
                             }
                         }
                     }
 
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && settings.themeMode != ThemeMode.SLATE) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && settings.themeMode == ThemeMode.SYSTEM) {
                         Spacer(modifier = Modifier.height(12.dp))
                         SheetSwitchRow(
                             icon = Icons.Rounded.Palette,
@@ -1362,18 +1432,7 @@ fun EmptyChatWelcome(
             contentAlignment = Alignment.Center
         ) {
             if (isSwitchingConversation) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(
-                        strokeWidth = 3.dp,
-                        modifier = Modifier.size(34.dp)
-                    )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = "Loading conversation…",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
+                SwitchingConversationLoader()
                 return@Box
             }
 
@@ -1517,5 +1576,87 @@ fun EmptyChatWelcome(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SwitchingConversationLoader() {
+    val progress = remember { Animatable(0.06f) }
+    LaunchedEffect(Unit) {
+        progress.animateTo(
+            targetValue = 0.55f,
+            animationSpec = tween(durationMillis = 520, easing = FastOutSlowInEasing)
+        )
+        progress.animateTo(
+            targetValue = 0.84f,
+            animationSpec = tween(durationMillis = 1200, easing = FastOutSlowInEasing)
+        )
+        progress.animateTo(
+            targetValue = 0.94f,
+            animationSpec = tween(durationMillis = 2400, easing = LinearEasing)
+        )
+    }
+
+    val infiniteTransition = rememberInfiniteTransition(label = "SwitchLoaderShimmer")
+    val shimmerOffset by infiniteTransition.animateFloat(
+        initialValue = -0.35f,
+        targetValue = 1.35f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1050, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "SwitchShimmerSweep"
+    )
+
+    val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+    val fillColor = MaterialTheme.colorScheme.primary
+    val shimmerColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.28f)
+
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth(0.56f)
+                .widthIn(min = 180.dp, max = 260.dp)
+                .height(10.dp)
+        ) {
+            drawRect(
+                color = trackColor,
+                topLeft = Offset.Zero,
+                size = size
+            )
+            val fillWidth = (size.width * progress.value).coerceIn(0f, size.width)
+            if (fillWidth > 0f) {
+                drawRect(
+                    color = fillColor,
+                    topLeft = Offset.Zero,
+                    size = Size(fillWidth, size.height)
+                )
+                val bandWidth = (fillWidth * 0.42f).coerceAtLeast(24f)
+                val bandStart = (shimmerOffset * fillWidth) - (bandWidth * 0.5f)
+                val clippedStart = bandStart.coerceIn(0f, fillWidth)
+                val clippedEnd = (bandStart + bandWidth).coerceIn(0f, fillWidth)
+                val clippedW = clippedEnd - clippedStart
+                if (clippedW > 1f) {
+                    drawRect(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(Color.Transparent, shimmerColor, Color.Transparent),
+                            startX = bandStart,
+                            endX = bandStart + bandWidth
+                        ),
+                        topLeft = Offset(clippedStart, 0f),
+                        size = Size(clippedW, size.height)
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(14.dp))
+        Text(
+            text = "Loading conversation…",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }

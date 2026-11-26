@@ -134,14 +134,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isDarkForMode(mode: ThemeMode): Boolean {
-        return when (mode) {
-            ThemeMode.DARK, ThemeMode.SLATE, ThemeMode.AMOLED -> true
-            ThemeMode.LIGHT -> false
-            ThemeMode.SYSTEM -> {
-                val nightMask = resources.configuration.uiMode and
-                    android.content.res.Configuration.UI_MODE_NIGHT_MASK
-                nightMask == android.content.res.Configuration.UI_MODE_NIGHT_YES
-            }
+        return if (mode == ThemeMode.SYSTEM) {
+            val nightMask = resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_NIGHT_MASK
+            nightMask == android.content.res.Configuration.UI_MODE_NIGHT_YES
+        } else {
+            mode.isDark
         }
     }
 

@@ -10,9 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -31,10 +29,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,7 +44,6 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -60,8 +59,100 @@ import androidx.compose.ui.text.style.BaselineShift
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+
+private val CODE_CARD_SHAPE = RoundedCornerShape(14.dp)
+private val COPY_PILL_SHAPE = RoundedCornerShape(8.dp)
+private val MATH_CARD_SHAPE = RoundedCornerShape(16.dp)
+private val BLOCKQUOTE_SHAPE = RoundedCornerShape(12.dp)
+private val TABLE_SHAPE = RoundedCornerShape(14.dp)
+
+private data class HighlightCacheKey(
+    val code: String,
+    val isDark: Boolean
+)
+
+private val highlightCache = object : LinkedHashMap<HighlightCacheKey, AnnotatedString>(64, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<HighlightCacheKey, AnnotatedString>?): Boolean {
+        return size > 64
+    }
+}
+
+private fun cachedHighlight(code: String, isDark: Boolean): AnnotatedString {
+    val key = HighlightCacheKey(code, isDark)
+    synchronized(highlightCache) {
+        highlightCache[key]?.let { return it }
+    }
+    val highlighted = CodeSyntaxHighlighter.highlight(code, isDark)
+    if (code.length <= 8_000) {
+        synchronized(highlightCache) {
+            highlightCache[key] = highlighted
+        }
+    }
+    return highlighted
+}
+
+private val latexCache = object : LinkedHashMap<String, LatexNode>(128, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LatexNode>?): Boolean {
+        return size > 128
+    }
+}
+
+private fun cachedParseLatex(latex: String): LatexNode {
+    synchronized(latexCache) {
+        latexCache[latex]?.let { return it }
+    }
+    val parsed = LatexParser.parse(latex)
+    if (latex.length <= 2_000) {
+        synchronized(latexCache) {
+            latexCache[latex] = parsed
+        }
+    }
+    return parsed
+}
+
+private data class AnnotatedCacheKey(
+    val inlines: List<MarkdownInline>,
+    val baseSize: TextUnit,
+    val primaryColor: Color,
+    val codeBg: Color,
+    val codeColor: Color,
+    val mathColor: Color
+)
+
+private val annotatedCache = object : LinkedHashMap<AnnotatedCacheKey, AnnotatedString>(256, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<AnnotatedCacheKey, AnnotatedString>?): Boolean {
+        return size > 256
+    }
+}
+
+private class TextLayoutHolder {
+    var result: TextLayoutResult? = null
+}
+
+@Immutable
+private data class MarkdownRenderStyles(
+    val isDark: Boolean,
+    val primaryColor: Color,
+    val codeBg: Color,
+    val codeColor: Color,
+    val mathColor: Color,
+    val outlineVariant: Color,
+    val blockquoteBg: Color,
+    val paragraphStyle: TextStyle,
+    val listStyle: TextStyle,
+    val listMarkerStyle: TextStyle,
+    val orderedMarkerStyle: TextStyle,
+    val h1Style: TextStyle,
+    val h2Style: TextStyle,
+    val h3Style: TextStyle,
+    val h4Style: TextStyle,
+    val codeTextStyle: TextStyle,
+    val tableHeaderStyle: TextStyle,
+    val tableCellStyle: TextStyle
+)
 
 @Composable
 fun NativeMarkdownView(
@@ -69,26 +160,92 @@ fun NativeMarkdownView(
     fontScale: Float = 1f,
     onCopyCode: (String) -> Unit,
     onLinkClick: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    enableSelection: Boolean = true
 ) {
     val blocks = remember(markdown) { MarkdownParser.parse(markdown) }
-    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val colorScheme = MaterialTheme.colorScheme
+    val typography = MaterialTheme.typography
+    val isDark = remember(colorScheme.background) { colorScheme.background.luminance() < 0.5f }
+    val styles = remember(colorScheme, typography, fontScale, isDark) {
+        val codeBg = if (isDark) colorScheme.surfaceContainerHighest else colorScheme.surfaceContainerHigh
+        val baseParagraph = typography.bodyLarge.copy(
+            fontSize = 15.sp * fontScale,
+            lineHeight = 23.sp * fontScale,
+            color = colorScheme.onSurface
+        )
+        val baseList = typography.bodyLarge.copy(
+            fontSize = 15.sp * fontScale,
+            lineHeight = 22.5.sp * fontScale,
+            color = colorScheme.onSurface
+        )
+        val headingBase = typography.titleMedium.copy(
+            fontWeight = FontWeight.SemiBold,
+            color = colorScheme.onSurface
+        )
+        MarkdownRenderStyles(
+            isDark = isDark,
+            primaryColor = colorScheme.primary,
+            codeBg = codeBg,
+            codeColor = colorScheme.onSurface,
+            mathColor = colorScheme.secondary,
+            outlineVariant = colorScheme.outlineVariant,
+            blockquoteBg = colorScheme.surfaceContainerLow,
+            paragraphStyle = baseParagraph,
+            listStyle = baseList,
+            listMarkerStyle = baseList.copy(
+                color = colorScheme.primary,
+                fontWeight = FontWeight.Bold
+            ),
+            orderedMarkerStyle = baseList.copy(
+                color = colorScheme.primary,
+                fontWeight = FontWeight.SemiBold
+            ),
+            h1Style = headingBase.copy(fontSize = 22.sp * fontScale, lineHeight = (22.sp * 1.32f) * fontScale),
+            h2Style = headingBase.copy(fontSize = 19.sp * fontScale, lineHeight = (19.sp * 1.32f) * fontScale),
+            h3Style = headingBase.copy(fontSize = 17.sp * fontScale, lineHeight = (17.sp * 1.32f) * fontScale),
+            h4Style = headingBase.copy(fontSize = 15.5.sp * fontScale, lineHeight = (15.5.sp * 1.32f) * fontScale),
+            codeTextStyle = TextStyle(
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp * fontScale,
+                lineHeight = 19.sp * fontScale,
+                color = colorScheme.onSurface
+            ),
+            tableHeaderStyle = typography.labelLarge.copy(
+                fontSize = 13.5.sp * fontScale,
+                fontWeight = FontWeight.SemiBold,
+                color = colorScheme.onSurface
+            ),
+            tableCellStyle = typography.bodyMedium.copy(
+                fontSize = 13.5.sp * fontScale,
+                color = colorScheme.onSurface
+            )
+        )
+    }
 
-    SelectionContainer(modifier = modifier.fillMaxWidth()) {
+    val content: @Composable () -> Unit = {
         Column(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = if (enableSelection) Modifier.fillMaxWidth() else modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            blocks.forEach { block ->
+            for (i in blocks.indices) {
                 RenderMarkdownBlock(
-                    block = block,
+                    block = blocks[i],
                     fontScale = fontScale,
-                    isDark = isDark,
+                    styles = styles,
                     onCopyCode = onCopyCode,
                     onLinkClick = onLinkClick
                 )
             }
         }
+    }
+
+    if (enableSelection) {
+        SelectionContainer(modifier = modifier.fillMaxWidth()) {
+            content()
+        }
+    } else {
+        content()
     }
 }
 
@@ -96,41 +253,32 @@ fun NativeMarkdownView(
 private fun RenderMarkdownBlock(
     block: MarkdownBlock,
     fontScale: Float,
-    isDark: Boolean,
+    styles: MarkdownRenderStyles,
     onCopyCode: (String) -> Unit,
     onLinkClick: (String) -> Unit
 ) {
     when (block) {
         is MarkdownBlock.Heading -> {
-            val baseSize = when (block.level) {
-                1 -> 22.sp
-                2 -> 19.sp
-                3 -> 17.sp
-                else -> 15.5.sp
+            val style = when (block.level) {
+                1 -> styles.h1Style
+                2 -> styles.h2Style
+                3 -> styles.h3Style
+                else -> styles.h4Style
             }
-            val style = MaterialTheme.typography.titleMedium.copy(
-                fontSize = baseSize * fontScale,
-                lineHeight = (baseSize * 1.32f) * fontScale,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
             InlineRichText(
                 inlines = block.inlines,
                 style = style,
+                styles = styles,
                 onLinkClick = onLinkClick,
-                modifier = Modifier.padding(top = if (block.level <= 2) 6.dp else 2.dp)
+                modifier = if (block.level <= 2) Modifier.padding(top = 6.dp) else Modifier.padding(top = 2.dp)
             )
         }
 
         is MarkdownBlock.Paragraph -> {
-            val style = MaterialTheme.typography.bodyLarge.copy(
-                fontSize = 15.sp * fontScale,
-                lineHeight = 23.sp * fontScale,
-                color = MaterialTheme.colorScheme.onSurface
-            )
             InlineRichText(
                 inlines = block.inlines,
-                style = style,
+                style = styles.paragraphStyle,
+                styles = styles,
                 onLinkClick = onLinkClick
             )
         }
@@ -139,8 +287,7 @@ private fun RenderMarkdownBlock(
             NativeCodeBlockCard(
                 language = block.language,
                 code = block.code,
-                fontScale = fontScale,
-                isDark = isDark,
+                styles = styles,
                 onCopy = { onCopyCode(block.code) }
             )
         }
@@ -154,47 +301,38 @@ private fun RenderMarkdownBlock(
         }
 
         is MarkdownBlock.BlockQuote -> {
-            Row(
+            val accentColor = styles.primaryColor
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(IntrinsicSize.Min)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                    .padding(end = 12.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .width(4.dp)
-                        .fillMaxHeight()
-                        .background(MaterialTheme.colorScheme.primary)
-                )
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    block.blocks.forEach { inner ->
-                        RenderMarkdownBlock(
-                            block = inner,
-                            fontScale = fontScale,
-                            isDark = isDark,
-                            onCopyCode = onCopyCode,
-                            onLinkClick = onLinkClick
+                    .clip(BLOCKQUOTE_SHAPE)
+                    .background(styles.blockquoteBg)
+                    .drawBehind {
+                        drawRect(
+                            color = accentColor,
+                            topLeft = Offset.Zero,
+                            size = Size(4.dp.toPx(), size.height)
                         )
                     }
+                    .padding(start = 16.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                for (i in block.blocks.indices) {
+                    RenderMarkdownBlock(
+                        block = block.blocks[i],
+                        fontScale = fontScale,
+                        styles = styles,
+                        onCopyCode = onCopyCode,
+                        onLinkClick = onLinkClick
+                    )
                 }
             }
         }
 
         is MarkdownBlock.BulletList -> {
-            val style = MaterialTheme.typography.bodyLarge.copy(
-                fontSize = 15.sp * fontScale,
-                lineHeight = 22.5.sp * fontScale,
-                color = MaterialTheme.colorScheme.onSurface
-            )
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                block.items.forEach { entry ->
+                for (i in block.items.indices) {
+                    val entry = block.items[i]
                     val bulletGlyph = when {
                         entry.checked == true -> "☑"
                         entry.checked == false -> "☐"
@@ -210,15 +348,13 @@ private fun RenderMarkdownBlock(
                     ) {
                         Text(
                             text = bulletGlyph,
-                            style = style.copy(
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold
-                            ),
+                            style = styles.listMarkerStyle,
                             modifier = Modifier.padding(start = 6.dp, end = 10.dp)
                         )
                         InlineRichText(
                             inlines = entry.inlines,
-                            style = style,
+                            style = styles.listStyle,
+                            styles = styles,
                             onLinkClick = onLinkClick,
                             modifier = Modifier.weight(1f)
                         )
@@ -228,13 +364,9 @@ private fun RenderMarkdownBlock(
         }
 
         is MarkdownBlock.OrderedList -> {
-            val style = MaterialTheme.typography.bodyLarge.copy(
-                fontSize = 15.sp * fontScale,
-                lineHeight = 22.5.sp * fontScale,
-                color = MaterialTheme.colorScheme.onSurface
-            )
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                block.items.forEach { entry ->
+                for (i in block.items.indices) {
+                    val entry = block.items[i]
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -243,15 +375,13 @@ private fun RenderMarkdownBlock(
                     ) {
                         Text(
                             text = "${entry.number}.",
-                            style = style.copy(
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.SemiBold
-                            ),
+                            style = styles.orderedMarkerStyle,
                             modifier = Modifier.padding(start = 4.dp, end = 10.dp)
                         )
                         InlineRichText(
                             inlines = entry.inlines,
-                            style = style,
+                            style = styles.listStyle,
+                            styles = styles,
                             onLinkClick = onLinkClick,
                             modifier = Modifier.weight(1f)
                         )
@@ -264,67 +394,159 @@ private fun RenderMarkdownBlock(
             NativeMarkdownTable(
                 headers = block.headers,
                 rows = block.rows,
-                fontScale = fontScale,
+                styles = styles,
                 onLinkClick = onLinkClick
             )
         }
 
         MarkdownBlock.HorizontalRule -> {
             HorizontalDivider(
-                color = MaterialTheme.colorScheme.outlineVariant,
+                color = styles.outlineVariant,
                 modifier = Modifier.padding(vertical = 4.dp)
             )
         }
     }
 }
 
+private fun List<MarkdownInline>.containsInlineCode(): Boolean {
+    for (i in indices) {
+        when (val item = this[i]) {
+            is MarkdownInline.InlineCode -> return true
+            is MarkdownInline.Bold -> if (item.children.containsInlineCode()) return true
+            is MarkdownInline.Italic -> if (item.children.containsInlineCode()) return true
+            is MarkdownInline.Strikethrough -> if (item.children.containsInlineCode()) return true
+            else -> Unit
+        }
+    }
+    return false
+}
+
+private fun List<MarkdownInline>.containsLink(): Boolean {
+    for (i in indices) {
+        when (val item = this[i]) {
+            is MarkdownInline.Link -> return true
+            is MarkdownInline.Bold -> if (item.children.containsLink()) return true
+            is MarkdownInline.Italic -> if (item.children.containsLink()) return true
+            is MarkdownInline.Strikethrough -> if (item.children.containsLink()) return true
+            else -> Unit
+        }
+    }
+    return false
+}
+
 @Composable
 private fun InlineRichText(
     inlines: List<MarkdownInline>,
     style: TextStyle,
+    styles: MarkdownRenderStyles,
     onLinkClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val primaryColor = MaterialTheme.colorScheme.primary
-    val codeBg = MaterialTheme.colorScheme.primary.copy(alpha = 0.13f)
-    val codeBorder = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
-    val codeColor = MaterialTheme.colorScheme.primary
-    val mathColor = MaterialTheme.colorScheme.secondary
+    if (inlines.isEmpty()) return
 
-    val annotated = remember(inlines, primaryColor, codeBg, codeColor, mathColor, style.fontSize) {
-        buildAnnotatedString {
-            appendInlines(
+    if (inlines.size == 1 && inlines[0] is MarkdownInline.Text) {
+        Text(
+            text = (inlines[0] as MarkdownInline.Text).value,
+            style = style,
+            modifier = modifier
+        )
+        return
+    }
+
+    val primaryColor = styles.primaryColor
+    val codeBg = styles.codeBg
+    val codeColor = styles.codeColor
+    val mathColor = styles.mathColor
+    val baseSize = if (style.fontSize.isSpecified) style.fontSize else 15.sp
+    val hasLink = remember(inlines) { inlines.containsLink() }
+    val hasInlineCode = remember(inlines) { inlines.containsInlineCode() }
+    val currentOnLinkClick by rememberUpdatedState(onLinkClick)
+
+    val annotated = remember(
+        inlines,
+        primaryColor,
+        codeBg,
+        codeColor,
+        mathColor,
+        baseSize,
+        hasLink
+    ) {
+        if (!hasLink) {
+            val cacheKey = AnnotatedCacheKey(
                 inlines = inlines,
-                baseSize = style.fontSize,
+                baseSize = baseSize,
                 primaryColor = primaryColor,
                 codeBg = codeBg,
                 codeColor = codeColor,
-                mathColor = mathColor,
-                onLinkClick = onLinkClick
+                mathColor = mathColor
             )
+            synchronized(annotatedCache) {
+                annotatedCache[cacheKey]?.let { return@remember it }
+            }
+            val built = buildAnnotatedString {
+                appendInlines(
+                    inlines = inlines,
+                    baseSize = baseSize,
+                    primaryColor = primaryColor,
+                    codeBg = codeBg,
+                    codeColor = codeColor,
+                    mathColor = mathColor,
+                    onLinkClick = { currentOnLinkClick(it) }
+                )
+            }
+            if (built.length <= 8_000) {
+                synchronized(annotatedCache) {
+                    annotatedCache[cacheKey] = built
+                }
+            }
+            built
+        } else {
+            buildAnnotatedString {
+                appendInlines(
+                    inlines = inlines,
+                    baseSize = baseSize,
+                    primaryColor = primaryColor,
+                    codeBg = codeBg,
+                    codeColor = codeColor,
+                    mathColor = mathColor,
+                    onLinkClick = { currentOnLinkClick(it) }
+                )
+            }
         }
     }
 
-    var layoutResult by remember(annotated) { mutableStateOf<TextLayoutResult?>(null) }
+    if (!hasInlineCode) {
+        Text(
+            text = annotated,
+            style = style,
+            modifier = modifier
+        )
+        return
+    }
+
+    val layoutHolder = remember(annotated) { TextLayoutHolder() }
+    val codeRanges = remember(annotated) {
+        annotated.getStringAnnotations("inline_code", 0, annotated.length)
+    }
 
     Text(
         text = annotated,
         style = style,
-        onTextLayout = { layoutResult = it },
+        onTextLayout = { layoutHolder.result = it },
         modifier = modifier.drawBehind {
-            val layout = layoutResult ?: return@drawBehind
-            val annotations = annotated.getStringAnnotations("inline_code", 0, annotated.length)
-            if (annotations.isEmpty()) return@drawBehind
+            val layout = layoutHolder.result ?: return@drawBehind
+            if (codeRanges.isEmpty()) return@drawBehind
 
-            val radiusPx = 5.dp.toPx()
+            val radiusPx = 4.dp.toPx()
             val hPadPx = 2.5.dp.toPx()
-            val vPadPx = 0.5.dp.toPx()
-            val borderStrokePx = 0.75.dp.toPx()
+            val baseSp = if (style.fontSize != TextUnit.Unspecified) style.fontSize else 15.sp
+            val codeFontPx = (baseSp * 0.88f).toPx()
 
-            annotations.forEach { range ->
+            for (r in codeRanges.indices) {
+                val range = codeRanges[r]
                 val startOffset = range.start.coerceIn(0, annotated.length)
                 val endOffset = range.end.coerceIn(startOffset, annotated.length)
-                if (startOffset >= endOffset) return@forEach
+                if (startOffset >= endOffset) continue
 
                 val firstLine = layout.getLineForOffset(startOffset)
                 val lastLine = layout.getLineForOffset((endOffset - 1).coerceAtLeast(startOffset))
@@ -333,12 +555,24 @@ private fun InlineRichText(
                     val segEnd = if (line == lastLine) endOffset else layout.getLineEnd(line, visibleEnd = true)
                     if (segStart >= segEnd) continue
 
-                    val startBox = layout.getBoundingBox(segStart)
-                    val endBox = layout.getBoundingBox(segEnd - 1)
-                    val left = (minOf(startBox.left, endBox.left) - hPadPx).coerceAtLeast(0f)
-                    val right = (maxOf(startBox.right, endBox.right) + hPadPx).coerceAtMost(size.width)
-                    val top = (minOf(startBox.top, endBox.top) + vPadPx).coerceAtLeast(0f)
-                    val bottom = (maxOf(startBox.bottom, endBox.bottom) - vPadPx).coerceAtMost(size.height)
+                    var minLeft = Float.POSITIVE_INFINITY
+                    var maxRight = Float.NEGATIVE_INFINITY
+                    for (charIdx in segStart until segEnd) {
+                        val charBox = layout.getBoundingBox(charIdx)
+                        if (charBox.left < minLeft) minLeft = charBox.left
+                        if (charBox.right > maxRight) maxRight = charBox.right
+                    }
+                    if (!minLeft.isFinite() || !maxRight.isFinite()) continue
+                    val left = (minLeft - hPadPx).coerceAtLeast(0f)
+                    val right = (maxRight + hPadPx).coerceAtMost(size.width)
+
+                    // Derive pill top/bottom strictly from line baseline + code font size so every
+                    // inline code box keeps uniform height regardless of glyph ascenders or wraps.
+                    val baseline = layout.getLineBaseline(line)
+                    val lineTop = layout.getLineTop(line)
+                    val lineBottom = layout.getLineBottom(line)
+                    val top = (baseline - codeFontPx * 0.94f).coerceAtLeast(lineTop + 0.5f).coerceAtLeast(0f)
+                    val bottom = (baseline + codeFontPx * 0.28f).coerceAtMost(lineBottom - 0.5f).coerceAtMost(size.height)
                     if (right <= left || bottom <= top) continue
 
                     drawRoundRect(
@@ -346,13 +580,6 @@ private fun InlineRichText(
                         topLeft = Offset(left, top),
                         size = Size(right - left, bottom - top),
                         cornerRadius = CornerRadius(radiusPx, radiusPx)
-                    )
-                    drawRoundRect(
-                        color = codeBorder,
-                        topLeft = Offset(left, top),
-                        size = Size(right - left, bottom - top),
-                        cornerRadius = CornerRadius(radiusPx, radiusPx),
-                        style = Stroke(width = borderStrokePx)
                     )
                 }
             }
@@ -402,7 +629,7 @@ private fun AnnotatedString.Builder.appendInlines(
                 pop()
             }
             is MarkdownInline.InlineMath -> {
-                val parsed = LatexParser.parse(inline.latex)
+                val parsed = cachedParseLatex(inline.latex)
                 pushStyle(
                     SpanStyle(
                         fontFamily = FontFamily.Serif,
@@ -528,61 +755,83 @@ private fun AnnotatedString.Builder.appendLatexInlineNode(
 private fun NativeCodeBlockCard(
     language: String,
     code: String,
-    fontScale: Float,
-    isDark: Boolean,
+    styles: MarkdownRenderStyles,
     onCopy: () -> Unit
 ) {
-    var copied by remember { mutableStateOf(false) }
-    LaunchedEffect(copied) {
-        if (copied) {
-            delay(1600L)
+    var copied by remember(language, code) { mutableStateOf(false) }
+    if (copied) {
+        LaunchedEffect(code) {
+            delay(1500L)
             copied = false
         }
     }
 
-    val highlighted = remember(code, isDark) {
-        CodeSyntaxHighlighter.highlight(code, isDark)
+    val highlighted = remember(code, styles.isDark) {
+        cachedHighlight(code, styles.isDark)
     }
 
     Surface(
-        shape = RoundedCornerShape(16.dp),
+        shape = CODE_CARD_SHAPE,
         color = MaterialTheme.colorScheme.surfaceContainerLowest,
         modifier = Modifier
             .fillMaxWidth()
             .border(
                 width = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
-                shape = RoundedCornerShape(16.dp)
+                color = styles.outlineVariant.copy(alpha = 0.7f),
+                shape = CODE_CARD_SHAPE
             )
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
+            // Compact top-left Copy button header row (offsetting code body below so button never overlaps code)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(start = 14.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(
-                    text = language.ifBlank { "code" }.lowercase(),
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontFamily = FontFamily.Monospace
-                    ),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                IconButton(
+                Surface(
                     onClick = {
                         onCopy()
                         copied = true
                     },
-                    modifier = Modifier.size(34.dp)
+                    shape = COPY_PILL_SHAPE,
+                    color = if (copied) {
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerHigh
+                    }
                 ) {
-                    Icon(
-                        imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
-                        contentDescription = "Copy code",
-                        tint = if (copied) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                            contentDescription = if (copied) "Copied code" else "Copy code",
+                            tint = if (copied) styles.primaryColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = if (copied) "Copied" else "Copy",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Medium
+                            ),
+                            color = if (copied) styles.primaryColor else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                if (language.isNotBlank()) {
+                    Text(
+                        text = language.lowercase(),
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(end = 6.dp)
                     )
                 }
             }
@@ -591,16 +840,11 @@ private fun NativeCodeBlockCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
-                    .padding(14.dp)
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
             ) {
                 Text(
                     text = highlighted,
-                    style = TextStyle(
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 13.sp * fontScale,
-                        lineHeight = 19.sp * fontScale,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                    style = styles.codeTextStyle
                 )
             }
         }
@@ -613,24 +857,24 @@ private fun NativeLatexDisplayCard(
     fontScale: Float,
     onCopy: () -> Unit
 ) {
-    val rootNode = remember(latex) { LatexParser.parse(latex) }
-    var copied by remember { mutableStateOf(false) }
-    LaunchedEffect(copied) {
-        if (copied) {
+    val rootNode = remember(latex) { cachedParseLatex(latex) }
+    var copied by remember(latex) { mutableStateOf(false) }
+    if (copied) {
+        LaunchedEffect(latex) {
             delay(1500L)
             copied = false
         }
     }
 
     Surface(
-        shape = RoundedCornerShape(16.dp),
+        shape = MATH_CARD_SHAPE,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier
             .fillMaxWidth()
             .border(
                 width = 1.dp,
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
-                shape = RoundedCornerShape(16.dp)
+                shape = MATH_CARD_SHAPE
             )
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
@@ -895,29 +1139,20 @@ private fun RenderLatexNode(
 private fun NativeMarkdownTable(
     headers: List<List<MarkdownInline>>,
     rows: List<List<List<MarkdownInline>>>,
-    fontScale: Float,
+    styles: MarkdownRenderStyles,
     onLinkClick: (String) -> Unit
 ) {
     val colCount = maxOf(headers.size, rows.maxOfOrNull { it.size } ?: 0).coerceAtLeast(1)
-    val headerStyle = MaterialTheme.typography.labelLarge.copy(
-        fontSize = 13.5.sp * fontScale,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.onSurface
-    )
-    val cellStyle = MaterialTheme.typography.bodyMedium.copy(
-        fontSize = 13.5.sp * fontScale,
-        color = MaterialTheme.colorScheme.onSurface
-    )
 
     Surface(
-        shape = RoundedCornerShape(14.dp),
+        shape = TABLE_SHAPE,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier
             .fillMaxWidth()
             .border(
                 width = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant,
-                shape = RoundedCornerShape(14.dp)
+                color = styles.outlineVariant,
+                shape = TABLE_SHAPE
             )
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
@@ -945,16 +1180,18 @@ private fun NativeMarkdownTable(
                         ) {
                             InlineRichText(
                                 inlines = headers.getOrElse(c) { emptyList() },
-                                style = headerStyle,
+                                style = styles.tableHeaderStyle,
+                                styles = styles,
                                 onLinkClick = onLinkClick
                             )
                         }
                     }
                 }
 
-                rows.forEach { row ->
+                for (r in rows.indices) {
+                    val row = rows[r]
                     HorizontalDivider(
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                        color = styles.outlineVariant.copy(alpha = 0.6f),
                         modifier = Modifier.fillMaxWidth()
                     )
                     Row(
@@ -969,7 +1206,8 @@ private fun NativeMarkdownTable(
                             ) {
                                 InlineRichText(
                                     inlines = row.getOrElse(c) { emptyList() },
-                                    style = cellStyle,
+                                    style = styles.tableCellStyle,
+                                    styles = styles,
                                     onLinkClick = onLinkClick
                                 )
                             }

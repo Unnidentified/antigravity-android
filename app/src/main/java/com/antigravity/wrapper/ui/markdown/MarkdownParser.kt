@@ -53,9 +53,11 @@ object MarkdownParser {
     private val TASK_PREFIX_REGEX = Regex("^\\[([ xX])]\\s+(.*)$")
     private val TABLE_SEP_REGEX = Regex("^\\|?(\\s*:?-+:?\\s*\\|)+(\\s*:?-+:?\\s*)?\\|?$")
 
-    private val parseCache = object : LinkedHashMap<String, List<MarkdownBlock>>(64, 0.75f, true) {
+    private val ESCAPABLE_CHARS = charArrayOf('$', '*', '_', '`', '[', ']', '\\')
+
+    private val parseCache = object : LinkedHashMap<String, List<MarkdownBlock>>(192, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<MarkdownBlock>>?): Boolean {
-            return size > 64
+            return size > 192
         }
     }
 
@@ -64,12 +66,94 @@ object MarkdownParser {
             parseCache[markdown]?.let { return it }
         }
         val parsed = parseInternal(markdown)
-        if (markdown.length <= 24_000) {
+        if (markdown.length <= 32_000) {
             synchronized(parseCache) {
                 parseCache[markdown] = parsed
             }
         }
         return parsed
+    }
+
+    private fun countLeadingBackticks(text: String): Int {
+        var count = 0
+        while (count < text.length && text[count] == '`') {
+            count++
+        }
+        return count
+    }
+
+    private fun parseFenceOpen(trimmedLine: String): Pair<Int, String>? {
+        val tickCount = countLeadingBackticks(trimmedLine)
+        if (tickCount < 3) return null
+        val info = trimmedLine.substring(tickCount)
+        if (info.contains('`')) return null
+        return tickCount to info.trim()
+    }
+
+    private fun isFenceClose(trimmedLine: String, minTicks: Int): Boolean {
+        val tickCount = countLeadingBackticks(trimmedLine)
+        return tickCount >= minTicks && tickCount == trimmedLine.length
+    }
+
+    private fun findClosingBackticks(text: String, start: Int, targetCount: Int): Int {
+        var idx = start
+        while (idx < text.length) {
+            if (text[idx] == '`') {
+                var run = 0
+                while (idx + run < text.length && text[idx + run] == '`') {
+                    run++
+                }
+                if (run == targetCount) {
+                    return idx
+                }
+                idx += run
+            } else {
+                idx++
+            }
+        }
+        return -1
+    }
+
+    private fun findBalancedClosingBracket(text: String, start: Int): Int {
+        var depth = 1
+        var idx = start
+        while (idx < text.length) {
+            val ch = text[idx]
+            if (ch == '\\' && idx + 1 < text.length) {
+                idx += 2
+                continue
+            }
+            when (ch) {
+                '[' -> depth++
+                ']' -> {
+                    depth--
+                    if (depth == 0) return idx
+                }
+            }
+            idx++
+        }
+        return -1
+    }
+
+    private fun findBalancedClosingParen(text: String, start: Int): Int {
+        var depth = 1
+        var idx = start
+        while (idx < text.length) {
+            val ch = text[idx]
+            if (ch == '\\' && idx + 1 < text.length) {
+                idx += 2
+                continue
+            }
+            when (ch) {
+                '(' -> depth++
+                ')' -> {
+                    depth--
+                    if (depth == 0) return idx
+                }
+            }
+            idx++
+        }
+        return -1
     }
 
     private fun leadingIndentDepth(spacesRaw: String): Int {
@@ -78,7 +162,11 @@ object MarkdownParser {
     }
 
     private fun parseInternal(markdown: String): List<MarkdownBlock> {
-        val normalized = markdown.replace("\r\n", "\n").replace('\r', '\n')
+        val normalized = if ('\r' in markdown) {
+            markdown.replace("\r\n", "\n").replace('\r', '\n')
+        } else {
+            markdown
+        }
         val lines = normalized.split('\n')
         val blocks = mutableListOf<MarkdownBlock>()
         var i = 0
@@ -92,18 +180,61 @@ object MarkdownParser {
                 continue
             }
 
-            // 1. Fenced code block ```lang
-            if (trimmed.startsWith("```")) {
-                val lang = trimmed.removePrefix("```").trim()
+            // 1. Fenced code block ```lang or ````lang (arbitrary >= 3 backticks)
+            val fenceOpen = parseFenceOpen(trimmed)
+            if (fenceOpen != null) {
+                val (fenceLen, lang) = fenceOpen
                 i++
                 val codeLines = mutableListOf<String>()
-                while (i < lines.size && !lines[i].trim().startsWith("```")) {
+                while (i < lines.size && !isFenceClose(lines[i].trim(), fenceLen)) {
                     codeLines.add(lines[i])
                     i++
                 }
                 if (i < lines.size) i++
                 blocks.add(MarkdownBlock.CodeBlock(lang, codeLines.joinToString("\n")))
                 continue
+            }
+
+            // 1b. Indented code block (4 spaces or leading tab, not a list item)
+            if ((line.startsWith("    ") || line.startsWith("\t")) &&
+                !BULLET_REGEX.matches(line) &&
+                !ORDERED_REGEX.matches(line)
+            ) {
+                val codeLines = mutableListOf<String>()
+                while (i < lines.size) {
+                    val curLine = lines[i]
+                    when {
+                        curLine.startsWith("    ") -> {
+                            codeLines.add(curLine.substring(4))
+                            i++
+                        }
+                        curLine.startsWith("\t") -> {
+                            codeLines.add(curLine.substring(1))
+                            i++
+                        }
+                        curLine.trim().isEmpty() -> {
+                            // Keep blank line only if another indented line follows
+                            var nextIdx = i + 1
+                            while (nextIdx < lines.size && lines[nextIdx].trim().isEmpty()) {
+                                nextIdx++
+                            }
+                            if (nextIdx < lines.size && (lines[nextIdx].startsWith("    ") || lines[nextIdx].startsWith("\t"))) {
+                                codeLines.add("")
+                                i++
+                            } else {
+                                break
+                            }
+                        }
+                        else -> break
+                    }
+                }
+                while (codeLines.isNotEmpty() && codeLines.last().isEmpty()) {
+                    codeLines.removeAt(codeLines.lastIndex)
+                }
+                if (codeLines.isNotEmpty()) {
+                    blocks.add(MarkdownBlock.CodeBlock("", codeLines.joinToString("\n")))
+                    continue
+                }
             }
 
             // 2. Display math block $$ ... $$ or \[ ... \]
@@ -196,7 +327,7 @@ object MarkdownParser {
                     quoteLines.add(lines[i].trim().removePrefix(">").removePrefix(" "))
                     i++
                 }
-                blocks.add(MarkdownBlock.BlockQuote(parse(quoteLines.joinToString("\n"))))
+                blocks.add(MarkdownBlock.BlockQuote(parseInternal(quoteLines.joinToString("\n"))))
                 continue
             }
 
@@ -220,7 +351,7 @@ object MarkdownParser {
                         lines[i].startsWith("  ") &&
                         !BULLET_REGEX.matches(lines[i]) &&
                         !ORDERED_REGEX.matches(lines[i]) &&
-                        !lines[i].trim().startsWith("```") &&
+                        parseFenceOpen(lines[i].trim()) == null &&
                         !lines[i].trim().startsWith("$$")
                     ) {
                         rawBody += " " + lines[i].trim()
@@ -246,7 +377,7 @@ object MarkdownParser {
                         lines[i].startsWith("  ") &&
                         !BULLET_REGEX.matches(lines[i]) &&
                         !ORDERED_REGEX.matches(lines[i]) &&
-                        !lines[i].trim().startsWith("```") &&
+                        parseFenceOpen(lines[i].trim()) == null &&
                         !lines[i].trim().startsWith("$$")
                     ) {
                         rawBody += " " + lines[i].trim()
@@ -264,12 +395,12 @@ object MarkdownParser {
                 val cur = lines[i]
                 val curTrimmed = cur.trim()
                 if (curTrimmed.isEmpty() ||
-                    curTrimmed.startsWith("```") ||
+                    curTrimmed[0] == '>' ||
+                    (curTrimmed[0] == '#' && HEADING_REGEX.matches(curTrimmed)) ||
                     curTrimmed.startsWith("$$") ||
                     curTrimmed.startsWith("\\[") ||
-                    curTrimmed.startsWith(">") ||
-                    HEADING_REGEX.matches(curTrimmed) ||
-                    HR_REGEX.matches(curTrimmed) ||
+                    (curTrimmed[0] == '`' && parseFenceOpen(curTrimmed) != null) ||
+                    ((curTrimmed[0] == '-' || curTrimmed[0] == '*' || curTrimmed[0] == '_') && HR_REGEX.matches(curTrimmed)) ||
                     BULLET_REGEX.matches(cur) ||
                     ORDERED_REGEX.matches(cur)
                 ) {
@@ -303,7 +434,7 @@ object MarkdownParser {
         }
         val cells = mutableListOf<String>()
         val cur = StringBuilder()
-        var inCode = false
+        var codeTickCount = 0
         var inMath = false
         var idx = 0
         while (idx < working.length) {
@@ -319,18 +450,28 @@ object MarkdownParser {
                 continue
             }
             if (ch == '`') {
-                inCode = !inCode
-                cur.append(ch)
-                idx++
+                var run = 0
+                while (idx + run < working.length && working[idx + run] == '`') {
+                    run++
+                }
+                cur.append(working, idx, idx + run)
+                if (codeTickCount == 0) {
+                    if (findClosingBackticks(working, idx + run, run) >= 0) {
+                        codeTickCount = run
+                    }
+                } else if (run == codeTickCount) {
+                    codeTickCount = 0
+                }
+                idx += run
                 continue
             }
-            if (!inCode && ch == '$') {
+            if (codeTickCount == 0 && ch == '$') {
                 inMath = !inMath
                 cur.append(ch)
                 idx++
                 continue
             }
-            if (ch == '|' && !inCode && !inMath) {
+            if (ch == '|' && codeTickCount == 0 && !inMath) {
                 cells.add(cur.toString().trim())
                 cur.setLength(0)
             } else {
@@ -343,6 +484,20 @@ object MarkdownParser {
     }
 
     fun parseInlines(text: String): List<MarkdownInline> {
+        if (text.isEmpty()) return emptyList()
+        var hasSpecial = false
+        for (idx in 0 until text.length) {
+            when (text[idx]) {
+                '\\', '`', '$', '[', '*', '_', '~' -> {
+                    hasSpecial = true
+                    break
+                }
+            }
+        }
+        if (!hasSpecial) {
+            return listOf(MarkdownInline.Text(text))
+        }
+
         val result = mutableListOf<MarkdownInline>()
         val buffer = StringBuilder()
         var i = 0
@@ -366,20 +521,36 @@ object MarkdownParser {
                         continue
                     }
                 }
-                if (next in charArrayOf('$', '*', '_', '`', '[', ']', '\\')) {
+                if (next in ESCAPABLE_CHARS) {
                     buffer.append(next)
                     i += 2
                     continue
                 }
             }
 
-            // Inline code `...`
+            // Inline code `...`, ``...``, ```...``` (arbitrary backtick run length)
             if (text[i] == '`') {
-                val end = text.indexOf('`', i + 1)
-                if (end > i + 1) {
+                var tickCount = 0
+                while (i + tickCount < text.length && text[i + tickCount] == '`') {
+                    tickCount++
+                }
+                val closeStart = findClosingBackticks(text, i + tickCount, tickCount)
+                if (closeStart >= 0) {
                     flushText()
-                    result.add(MarkdownInline.InlineCode(text.substring(i + 1, end)))
-                    i = end + 1
+                    var code = text.substring(i + tickCount, closeStart)
+                    if (code.length >= 2 &&
+                        code.startsWith(' ') &&
+                        code.endsWith(' ') &&
+                        code.any { it != ' ' }
+                    ) {
+                        code = code.substring(1, code.length - 1)
+                    }
+                    result.add(MarkdownInline.InlineCode(code))
+                    i = closeStart + tickCount
+                    continue
+                } else {
+                    buffer.append(text, i, i + tickCount)
+                    i += tickCount
                     continue
                 }
             }
@@ -406,15 +577,27 @@ object MarkdownParser {
                 }
             }
 
-            // Link [label](url)
+            // Link [label](url) with balanced parentheses/brackets support
             if (text[i] == '[') {
-                val closeBracket = text.indexOf(']', i + 1)
+                val closeBracket = findBalancedClosingBracket(text, i + 1)
                 if (closeBracket > i + 1 && closeBracket + 1 < text.length && text[closeBracket + 1] == '(') {
-                    val closeParen = text.indexOf(')', closeBracket + 2)
+                    val closeParen = if (closeBracket + 2 < text.length && text[closeBracket + 2] == '<') {
+                        val gt = text.indexOf('>', closeBracket + 3)
+                        if (gt > closeBracket + 3 && gt + 1 < text.length && text[gt + 1] == ')') {
+                            gt + 1
+                        } else {
+                            findBalancedClosingParen(text, closeBracket + 2)
+                        }
+                    } else {
+                        findBalancedClosingParen(text, closeBracket + 2)
+                    }
                     if (closeParen > closeBracket + 2) {
                         flushText()
                         val label = text.substring(i + 1, closeBracket).replace("`", "")
-                        val url = text.substring(closeBracket + 2, closeParen).trim()
+                        var url = text.substring(closeBracket + 2, closeParen).trim()
+                        if (url.startsWith('<') && url.endsWith('>') && url.length >= 2) {
+                            url = url.substring(1, url.length - 1).trim()
+                        }
                         result.add(MarkdownInline.Link(label, url))
                         i = closeParen + 1
                         continue

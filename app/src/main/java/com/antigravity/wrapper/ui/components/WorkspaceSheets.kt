@@ -1,6 +1,8 @@
 package com.antigravity.wrapper.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -16,17 +18,20 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.alpha
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Archive
@@ -56,6 +61,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -68,7 +74,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -82,6 +90,7 @@ import com.antigravity.wrapper.data.DocumentViewerData
 import com.antigravity.wrapper.data.ProjectOption
 import com.antigravity.wrapper.data.WorkspaceArtifactItem
 import com.antigravity.wrapper.ui.markdown.NativeMarkdownView
+import com.antigravity.wrapper.ui.theme.diffColors
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,6 +101,9 @@ fun FileDiffViewerSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val collapsedIds = remember { mutableStateMapOf<String, Boolean>() }
+    var wrapLines by remember { mutableStateOf(false) }
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val diffPalette = remember(isDark) { diffColors(isDark) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -99,13 +111,14 @@ fun FileDiffViewerSheet(
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         tonalElevation = 0.dp,
         scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets.navigationBars }
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(0.88f)
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .navigationBarsPadding()
                 .padding(horizontal = 16.dp)
                 .padding(bottom = 24.dp)
         ) {
@@ -143,6 +156,26 @@ fun FileDiffViewerSheet(
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        onClick = { wrapLines = !wrapLines },
+                        shape = RoundedCornerShape(999.dp),
+                        color = if (wrapLines) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerHigh
+                        }
+                    ) {
+                        Text(
+                            text = "Wrap",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (wrapLines) {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
                     IconButton(onClick = onRefresh, enabled = !data.isLoading) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "Refresh diffs", modifier = Modifier.size(20.dp))
                     }
@@ -194,11 +227,17 @@ fun FileDiffViewerSheet(
                             .weight(1f),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        items(data.files, key = { it.id }) { file ->
+                        items(
+                            items = data.files,
+                            key = { it.id },
+                            contentType = { "diff_file" }
+                        ) { file ->
                             val isCollapsed = collapsedIds[file.id] == true
                             DiffFileCard(
                                 file = file,
+                                diffPalette = diffPalette,
                                 isCollapsed = isCollapsed,
+                                wrapLines = wrapLines,
                                 onToggle = { collapsedIds[file.id] = !isCollapsed }
                             )
                         }
@@ -212,12 +251,16 @@ fun FileDiffViewerSheet(
 @Composable
 private fun DiffFileCard(
     file: DiffFile,
+    diffPalette: com.antigravity.wrapper.ui.theme.DiffColors,
     isCollapsed: Boolean,
+    wrapLines: Boolean = false,
     onToggle: () -> Unit
 ) {
+    val cardBg = MaterialTheme.colorScheme.surfaceContainerLowest
+
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        color = cardBg,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -255,7 +298,7 @@ private fun DiffFileCard(
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.SemiBold
                     ),
-                    color = Color(0xFF4ADE80)
+                    color = diffPalette.addedAccent
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
@@ -264,7 +307,7 @@ private fun DiffFileCard(
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.SemiBold
                     ),
-                    color = Color(0xFFF87171)
+                    color = diffPalette.removedAccent
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Icon(
@@ -284,75 +327,137 @@ private fun DiffFileCard(
                         modifier = Modifier.padding(12.dp)
                     )
                 } else {
-                    SelectionContainer {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState())
-                                .padding(vertical = 6.dp)
-                        ) {
-                            Column(
-                                modifier = Modifier
+                    val hScroll = rememberScrollState()
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        SelectionContainer {
+                            val outerModifier = if (wrapLines) {
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 6.dp)
+                            } else {
+                                Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(hScroll)
+                                    .padding(vertical = 6.dp)
+                            }
+                            val innerModifier = if (wrapLines) {
+                                Modifier.fillMaxWidth()
+                            } else {
+                                Modifier
                                     .width(IntrinsicSize.Max)
                                     .widthIn(min = 340.dp)
-                            ) {
-                                file.lines.forEach { line ->
-                                    val bg = when (line.kind) {
-                                        DiffLineKind.ADDED -> Color(0xFF153823)
-                                        DiffLineKind.REMOVED -> Color(0xFF3E181C)
-                                        DiffLineKind.HUNK -> MaterialTheme.colorScheme.surfaceContainerHigh
-                                        DiffLineKind.CONTEXT -> Color.Transparent
-                                    }
-                                    val gutterPrefix = when (line.kind) {
-                                        DiffLineKind.ADDED -> "+"
-                                        DiffLineKind.REMOVED -> "-"
-                                        DiffLineKind.HUNK -> " "
-                                        DiffLineKind.CONTEXT -> " "
-                                    }
-                                    val gutterColor = when (line.kind) {
-                                        DiffLineKind.ADDED -> Color(0xFF4ADE80)
-                                        DiffLineKind.REMOVED -> Color(0xFFF87171)
-                                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
-                                    }
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .background(bg)
-                                            .padding(horizontal = 10.dp, vertical = 2.dp),
-                                        verticalAlignment = Alignment.Top
-                                    ) {
-                                        if (line.lineNumber.isNotBlank()) {
+                            }
+                            val lineNumColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+                            val onSurfaceColor = MaterialTheme.colorScheme.onSurface
+                            val hunkBgColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                            val lineNumStyle = remember(lineNumColor) {
+                                TextStyle(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.5.sp,
+                                    color = lineNumColor
+                                )
+                            }
+                            val codeStyle = remember(onSurfaceColor) {
+                                TextStyle(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp,
+                                    lineHeight = 18.sp,
+                                    letterSpacing = (-0.15).sp,
+                                    color = onSurfaceColor
+                                )
+                            }
+                            Column(modifier = outerModifier) {
+                                Column(modifier = innerModifier) {
+                                    file.lines.forEach { line ->
+                                        val bg = when (line.kind) {
+                                            DiffLineKind.ADDED -> diffPalette.addedRowBackground
+                                            DiffLineKind.REMOVED -> diffPalette.removedRowBackground
+                                            DiffLineKind.HUNK -> hunkBgColor
+                                            DiffLineKind.CONTEXT -> Color.Transparent
+                                        }
+                                        val gutterPrefix = when (line.kind) {
+                                            DiffLineKind.ADDED -> "+"
+                                            DiffLineKind.REMOVED -> "-"
+                                            DiffLineKind.HUNK -> " "
+                                            DiffLineKind.CONTEXT -> " "
+                                        }
+                                        val gutterColor = when (line.kind) {
+                                            DiffLineKind.ADDED -> diffPalette.addedAccent
+                                            DiffLineKind.REMOVED -> diffPalette.removedAccent
+                                            else -> lineNumColor
+                                        }
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .background(bg)
+                                                .padding(horizontal = 10.dp, vertical = 2.dp),
+                                            verticalAlignment = Alignment.Top
+                                        ) {
+                                            if (line.lineNumber.isNotBlank()) {
+                                                Text(
+                                                    text = line.lineNumber.padStart(3, ' '),
+                                                    style = lineNumStyle
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                            }
                                             Text(
-                                                text = line.lineNumber.padStart(3, ' '),
+                                                text = gutterPrefix,
                                                 style = TextStyle(
                                                     fontFamily = FontFamily.Monospace,
-                                                    fontSize = 11.5.sp,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = gutterColor
                                                 )
                                             )
-                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = line.text,
+                                                style = codeStyle,
+                                                modifier = if (wrapLines) Modifier.weight(1f) else Modifier
+                                            )
                                         }
-                                        Text(
-                                            text = gutterPrefix,
-                                            style = TextStyle(
-                                                fontFamily = FontFamily.Monospace,
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = gutterColor
-                                            )
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = line.text,
-                                            style = TextStyle(
-                                                fontFamily = FontFamily.Monospace,
-                                                fontSize = 12.sp,
-                                                lineHeight = 18.sp,
-                                                color = MaterialTheme.colorScheme.onSurface
-                                            )
-                                        )
                                     }
                                 }
+                            }
+                        }
+
+                        if (!wrapLines && hScroll.canScrollBackward) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .padding(vertical = 6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.CenterStart)
+                                        .width(14.dp)
+                                        .fillMaxHeight()
+                                        .background(
+                                            Brush.horizontalGradient(
+                                                colors = listOf(cardBg.copy(alpha = 0.9f), Color.Transparent)
+                                            )
+                                        )
+                                )
+                            }
+                        }
+
+                        if (!wrapLines && hScroll.canScrollForward) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .padding(vertical = 6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.CenterEnd)
+                                        .width(24.dp)
+                                        .fillMaxHeight()
+                                        .background(
+                                            Brush.horizontalGradient(
+                                                colors = listOf(Color.Transparent, cardBg.copy(alpha = 0.92f))
+                                            )
+                                        )
+                                )
                             }
                         }
                     }
@@ -381,13 +486,14 @@ fun DocumentViewerSheet(
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         tonalElevation = 0.dp,
         scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets.navigationBars }
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(0.88f)
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .navigationBarsPadding()
                 .padding(horizontal = 16.dp)
                 .padding(bottom = 24.dp)
         ) {
@@ -554,6 +660,9 @@ fun WorkspaceAndActionsSheet(
     artifacts: List<WorkspaceArtifactItem>,
     isLoadingArtifacts: Boolean,
     hasSidePanel: Boolean,
+    isNewChat: Boolean = false,
+    webInspectorEnabled: Boolean = false,
+    onToggleWebInspector: (Boolean) -> Unit = {},
     onOpenDiffs: () -> Unit,
     onOpenArtifact: (WorkspaceArtifactItem) -> Unit,
     onOpenPermissions: () -> Unit,
@@ -584,13 +693,15 @@ fun WorkspaceAndActionsSheet(
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         tonalElevation = 0.dp,
         scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets.navigationBars }
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
+                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -617,11 +728,13 @@ fun WorkspaceAndActionsSheet(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
-                    if (hasSidePanel) {
+                    if (hasSidePanel || isNewChat) {
+                        val diffsEnabled = !isNewChat && hasSidePanel
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable {
+                                .alpha(if (diffsEnabled) 1f else 0.38f)
+                                .clickable(enabled = diffsEnabled) {
                                     onDismiss()
                                     onOpenDiffs()
                                 }
@@ -631,13 +744,21 @@ fun WorkspaceAndActionsSheet(
                             Icon(
                                 imageVector = Icons.Rounded.Difference,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
+                                tint = if (diffsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("Review File Diffs", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-                                Text("Inspect code changes in this conversation", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    text = if (isNewChat) {
+                                        "Start a conversation to review diffs"
+                                    } else {
+                                        "Inspect code changes in this conversation"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -672,18 +793,32 @@ fun WorkspaceAndActionsSheet(
             }
 
             // Artifacts & Links from Side Panel
-            if (hasSidePanel) {
+            if (hasSidePanel || isNewChat) {
                 Text(
                     text = "ARTIFACTS & DOCUMENTS",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
+                    color = if (isNewChat) {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    }
                 )
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .alpha(if (isNewChat) 0.45f else 1f)
                 ) {
                     when {
+                        isNewChat -> {
+                            Text(
+                                text = "Start a conversation to view artifacts and documents.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
                         isLoadingArtifacts -> {
                             Row(
                                 modifier = Modifier
@@ -754,22 +889,29 @@ fun WorkspaceAndActionsSheet(
                 }
             }
 
-            // Conversation Actions (Rename, Pin, Archive)
+            // Conversation Actions (Rename, Pin, Archive) — disabled until a conversation starts
+            val threadActionsEnabled = !isNewChat
             Text(
                 text = "CONVERSATION",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary
+                color = if (threadActionsEnabled) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                }
             )
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .alpha(if (threadActionsEnabled) 1f else 0.38f)
             ) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { showRenameDialog = true }
+                            .clickable(enabled = threadActionsEnabled) { showRenameDialog = true }
                             .padding(horizontal = 16.dp, vertical = 13.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -781,7 +923,7 @@ fun WorkspaceAndActionsSheet(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
+                            .clickable(enabled = threadActionsEnabled) {
                                 onDismiss()
                                 onPinThread()
                             }
@@ -796,17 +938,64 @@ fun WorkspaceAndActionsSheet(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
+                            .clickable(enabled = threadActionsEnabled) {
                                 onDismiss()
                                 onArchiveThread()
                             }
                             .padding(horizontal = 16.dp, vertical = 13.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Rounded.Archive, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(19.dp))
+                        val archiveColor = if (threadActionsEnabled) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                        Icon(Icons.Rounded.Archive, contentDescription = null, tint = archiveColor, modifier = Modifier.size(19.dp))
                         Spacer(modifier = Modifier.width(12.dp))
-                        Text("Archive", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                        Text("Archive", style = MaterialTheme.typography.bodyMedium, color = archiveColor)
                     }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Text(
+                text = "SESSION",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.8.sp
+                ),
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                onClick = { onToggleWebInspector(!webInspectorEnabled) },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Visibility,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(19.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "Show underlying session",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = webInspectorEnabled,
+                        onCheckedChange = onToggleWebInspector
+                    )
                 }
             }
         }
@@ -868,13 +1057,14 @@ fun ProjectSelectorSheet(
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         tonalElevation = 0.dp,
         scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets.navigationBars }
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -895,8 +1085,16 @@ fun ProjectSelectorSheet(
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    options.forEachIndexed { idx, proj ->
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                ) {
+                    itemsIndexed(
+                        items = options,
+                        key = { _, proj -> "${proj.id}:${proj.name}" },
+                        contentType = { _, _ -> "project_row" }
+                    ) { idx, proj ->
                         if (idx > 0) {
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
                         }
@@ -963,12 +1161,13 @@ fun PermissionsSelectorSheet(
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         tonalElevation = 0.dp,
         scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets.navigationBars }
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),

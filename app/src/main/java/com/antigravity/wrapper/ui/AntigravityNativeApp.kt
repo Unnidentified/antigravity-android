@@ -11,6 +11,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,14 +56,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -80,9 +84,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.antigravity.wrapper.bridge.AntigravityBridgeEngine
+import com.antigravity.wrapper.data.ArtifactCard
 import com.antigravity.wrapper.data.BridgeStatus
+import com.antigravity.wrapper.data.MessageRole
 import com.antigravity.wrapper.ui.components.ChatDrawerSheet
 import com.antigravity.wrapper.ui.components.ChatMessageItem
+import com.antigravity.wrapper.ui.components.ExpandedReasoningState
 import com.antigravity.wrapper.ui.components.ChatTopBar
 import com.antigravity.wrapper.ui.components.DocumentViewerSheet
 import com.antigravity.wrapper.ui.components.EmptyChatWelcome
@@ -101,6 +108,7 @@ import com.antigravity.wrapper.ui.theme.isEffectiveDarkTheme
 import com.antigravity.wrapper.web.AntigravityWebChromeClient
 import com.antigravity.wrapper.web.AntigravityWebViewClient
 import com.antigravity.wrapper.web.DownloadHandler
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -130,9 +138,10 @@ fun AntigravityNativeApp(
     val displayedMessages = uiState.displayedMessages
     val currentUrl = uiState.snapshot.currentUrl
     val conversationKey = remember(currentUrl) {
-        currentUrl.substringBefore('?').substringBefore('#')
+        currentUrl.trim()
     }
-    val hasOlderHeader = uiState.snapshot.hasOlderMessages && displayedMessages.isNotEmpty()
+    val hasOlderHeader = (uiState.snapshot.hasOlderMessages || uiState.isLoadingOlderMessages) &&
+        displayedMessages.isNotEmpty()
     val listState = key(conversationKey) {
         val initialIndex = if (displayedMessages.isNotEmpty()) {
             displayedMessages.size + (if (hasOlderHeader) 1 else 0)
@@ -149,13 +158,18 @@ fun AntigravityNativeApp(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
+    val currentHapticEnabled by rememberUpdatedState(settings.hapticFeedbackEnabled)
+    val currentOnCopyToClipboard by rememberUpdatedState(onCopyToClipboard)
+    val currentOnShareText by rememberUpdatedState(onShareText)
+    val currentOnOpenExternalUrl by rememberUpdatedState(onOpenExternalUrl)
+
     fun dismissKeyboardAndFocus() {
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
     }
 
     fun triggerHaptic() {
-        if (settings.hapticFeedbackEnabled) {
+        if (currentHapticEnabled) {
             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
         }
     }
@@ -170,7 +184,7 @@ fun AntigravityNativeApp(
     fun copyDomSnapshot() {
         bridgeEngine.exportDomSnapshot { snapshotJson ->
             if (!snapshotJson.isNullOrBlank()) {
-                onCopyToClipboard("Antigravity DOM Snapshot", snapshotJson)
+                currentOnCopyToClipboard("Antigravity DOM Snapshot", snapshotJson)
                 showToast("Sanitized DOM snapshot copied")
             } else {
                 showToast("Session still loading — try again in a moment")
@@ -182,8 +196,11 @@ fun AntigravityNativeApp(
         triggerHaptic()
         dismissKeyboardAndFocus()
         viewModel.openDiffReviewLoading(cardTitle.ifBlank { "Review Changes" })
-        bridgeEngine.openReviewDiffs(cardTitle) { diffData ->
-            viewModel.onDiffReviewLoaded(diffData)
+        scope.launch {
+            delay(180L)
+            bridgeEngine.openReviewDiffs(cardTitle) { diffData ->
+                viewModel.onDiffReviewLoaded(diffData)
+            }
         }
     }
 
@@ -191,8 +208,26 @@ fun AntigravityNativeApp(
         triggerHaptic()
         dismissKeyboardAndFocus()
         viewModel.openDocumentLoading(docTitle)
-        bridgeEngine.openDocumentViewer(docTitle) { docData ->
-            viewModel.onDocumentLoaded(docData)
+        scope.launch {
+            delay(180L)
+            bridgeEngine.openDocumentViewer(docTitle) { docData ->
+                val externalPrefix = "EXTERNAL_LINK:"
+                val rawErr = docData.error?.trim().orEmpty()
+                val rawMd = docData.markdownContent.trim()
+                val externalUrl = when {
+                    rawErr.startsWith(externalPrefix, ignoreCase = true) ->
+                        rawErr.substring(externalPrefix.length).trim()
+                    rawMd.startsWith(externalPrefix, ignoreCase = true) ->
+                        rawMd.substring(externalPrefix.length).trim()
+                    else -> ""
+                }
+                if (externalUrl.isNotEmpty()) {
+                    viewModel.closeDocumentViewer()
+                    currentOnOpenExternalUrl(externalUrl)
+                } else {
+                    viewModel.onDocumentLoaded(docData)
+                }
+            }
         }
     }
 
@@ -203,7 +238,7 @@ fun AntigravityNativeApp(
                 openDocument(fileName)
             }
         } else {
-            onOpenExternalUrl(url)
+            currentOnOpenExternalUrl(url)
         }
     }
 
@@ -226,7 +261,10 @@ fun AntigravityNativeApp(
         triggerHaptic()
         dismissKeyboardAndFocus()
         viewModel.setProjectSheetOpen(true)
-        bridgeEngine.refreshProjects()
+        scope.launch {
+            delay(180L)
+            bridgeEngine.refreshProjects()
+        }
     }
 
     fun sendCurrentPrompt(overrideText: String? = null) {
@@ -329,41 +367,136 @@ fun AntigravityNativeApp(
     }
 
     val bottomAnchorIndex = displayedMessages.size + (if (hasOlderHeader) 1 else 0)
-    val lastMessageSignature = displayedMessages.lastOrNull()?.let {
-        "${it.role}:${it.id}:${it.markdownContent.take(80)}:${it.artifacts.size}"
+    val lastMessageSignature = displayedMessages.lastOrNull()?.let { msg ->
+        val reasoningSig = msg.reasoningBlocks.sumOf { b ->
+            b.content.length + b.sections.sumOf { s -> s.steps.size }
+        }
+        "${msg.role}:${msg.id}:${msg.markdownContent.length}:${msg.markdownContent.takeLast(32)}:${msg.artifacts.size}:$reasoningSig:${msg.isStreaming}"
     }
-    var seenLastMessageKey by remember(conversationKey) { mutableStateOf<String?>(null) }
+    var seenLastSignature by remember(conversationKey) { mutableStateOf<String?>(null) }
+    var prevBottomAnchorIndex by remember(conversationKey) { mutableIntStateOf(bottomAnchorIndex) }
+    var initialSnapDeadlineMs by remember(conversationKey) { mutableLongStateOf(0L) }
+    var userScrolledAway by remember(conversationKey) { mutableStateOf(false) }
+    var wasPinnedToBottom by remember(conversationKey) { mutableStateOf(true) }
 
-    // Anchor viewport accurately on prepend ("Load earlier messages") and snap to bottom only for bottom appends / initial load.
+    LaunchedEffect(listState, conversationKey) {
+        try {
+            snapshotFlow { listState.isScrollInProgress }
+                .distinctUntilChanged()
+                .collect { bridgeEngine.setScrolling(it) }
+        } finally {
+            bridgeEngine.setScrolling(false)
+        }
+    }
+
+    LaunchedEffect(listState, conversationKey) {
+        listState.interactionSource.interactions.collect { interaction ->
+            if (interaction is DragInteraction.Start) {
+                userScrolledAway = true
+            }
+        }
+    }
+
+    // Keep bottom pinned when IME opens or multiline composer shrinks viewport while already at bottom.
+    LaunchedEffect(listState, conversationKey) {
+        var prevHeight = 0
+        snapshotFlow {
+            Triple(
+                listState.layoutInfo.viewportSize.height,
+                listState.canScrollForward,
+                listState.layoutInfo.totalItemsCount
+            )
+        }.collect { (height, canScrollFwd, totalItems) ->
+            if (height > 0 && prevHeight > 0 && height < prevHeight && wasPinnedToBottom && totalItems > 0) {
+                listState.scrollToItem(totalItems - 1)
+            } else if (height > 0) {
+                wasPinnedToBottom = !canScrollFwd
+            }
+            if (height > 0) {
+                prevHeight = height
+            }
+        }
+    }
+
+    // Synchronously restore prepend scroll offset within the same layout frame (zero visual jump or jitter)
+    SideEffect {
+        val anchorId = pendingPrependAnchorId
+        if (anchorId != null && displayedMessages.size > pendingPrependPrevCount) {
+            val anchorMsgIdx = displayedMessages.indexOfFirst { it.id == anchorId }
+            if (anchorMsgIdx >= 0) {
+                val targetIdx = anchorMsgIdx + (if (hasOlderHeader) 1 else 0)
+                listState.requestScrollToItem(targetIdx, -pendingPrependAnchorOffset)
+            }
+        }
+    }
+
+    // Clear prepend anchor after older batch settles; snap to bottom for initial hydration and tail/streaming updates.
     LaunchedEffect(conversationKey, displayedMessages.size, lastMessageSignature, hasOlderHeader, uiState.isLoadingOlderMessages) {
         val anchorId = pendingPrependAnchorId
         if (anchorId != null) {
             val anchorMsgIdx = displayedMessages.indexOfFirst { it.id == anchorId }
             if (anchorMsgIdx >= 0) {
                 val targetIdx = anchorMsgIdx + (if (hasOlderHeader) 1 else 0)
-                listState.scrollToItem(targetIdx, pendingPrependAnchorOffset)
+                listState.scrollToItem(targetIdx, -pendingPrependAnchorOffset)
             }
             if (displayedMessages.size > pendingPrependPrevCount || !uiState.isLoadingOlderMessages) {
                 pendingPrependAnchorId = null
+                seenLastSignature = lastMessageSignature
+                prevBottomAnchorIndex = bottomAnchorIndex
+                initialSnapDeadlineMs = 0L
             }
             return@LaunchedEffect
         }
 
         if (displayedMessages.isNotEmpty()) {
-            val tailKey = displayedMessages.lastOrNull()?.id
-            val isUserMessage = displayedMessages.lastOrNull()?.role == com.antigravity.wrapper.data.MessageRole.USER
-            val wasNearBottom = !listState.canScrollForward ||
-                (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= (bottomAnchorIndex - 2)
-            if (seenLastMessageKey == null || (tailKey != seenLastMessageKey && (wasNearBottom || isUserMessage))) {
-                listState.scrollToItem(bottomAnchorIndex)
+            val now = System.currentTimeMillis()
+            if (seenLastSignature == null) {
+                initialSnapDeadlineMs = now + 2_000L
+                userScrolledAway = false
             }
-            seenLastMessageKey = tailKey
+            val withinInitialHydration = !userScrolledAway && now <= initialSnapDeadlineMs
+            val isUserMessage = displayedMessages.lastOrNull()?.role == com.antigravity.wrapper.data.MessageRole.USER
+            val lastVisibleIdx = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val wasNearBottom = !listState.canScrollForward ||
+                wasPinnedToBottom ||
+                lastVisibleIdx >= (prevBottomAnchorIndex - 2)
+            val signatureChanged = lastMessageSignature != seenLastSignature
+            if (seenLastSignature == null ||
+                withinInitialHydration ||
+                (signatureChanged && (wasNearBottom || isUserMessage))
+            ) {
+                if (isUserMessage) {
+                    userScrolledAway = false
+                }
+                listState.scrollToItem(bottomAnchorIndex)
+                wasPinnedToBottom = true
+            }
+            seenLastSignature = lastMessageSignature
+            prevBottomAnchorIndex = bottomAnchorIndex
+        } else {
+            seenLastSignature = null
+            prevBottomAnchorIndex = 0
         }
     }
 
-    val showScrollToBottom by remember(listState) {
+    val showScrollToBottom by remember(listState, density) {
+        val minRemainingPx = with(density) { 24.dp.toPx() }
         derivedStateOf {
-            listState.layoutInfo.totalItemsCount > 0 && listState.canScrollForward
+            val info = listState.layoutInfo
+            if (info.totalItemsCount == 0 || !listState.canScrollForward) {
+                false
+            } else {
+                val lastVisible = info.visibleItemsInfo.lastOrNull()
+                when {
+                    lastVisible == null -> false
+                    lastVisible.index < info.totalItemsCount - 1 -> true
+                    else -> {
+                        val remainingPx = (lastVisible.offset + lastVisible.size) -
+                            (info.viewportEndOffset - info.afterContentPadding)
+                        remainingPx > minRemainingPx
+                    }
+                }
+            }
         }
     }
 
@@ -515,10 +648,10 @@ fun AntigravityNativeApp(
                                     dismissKeyboardAndFocus()
                                     scope.launch { drawerState.close() }
                                     val isAlreadyActive = conv.isActive ||
-                                        (conv.url.isNotBlank() && conv.url == currentUrl) ||
-                                        (conv.title.isNotBlank() && conv.title == uiState.snapshot.conversationTitle)
+                                        (conv.url.isNotBlank() && currentUrl.isNotBlank() && conv.url.trim() == currentUrl.trim()) ||
+                                        (conv.url.isBlank() && conv.title.isNotBlank() && conv.title == uiState.snapshot.conversationTitle)
                                     if (!isAlreadyActive) {
-                                        viewModel.onStartConversationSwitch()
+                                        viewModel.onStartConversationSwitch(conv.url, conv.title)
                                         bridgeEngine.selectConversation(conv.url, conv.title)
                                     }
                                 },
@@ -550,7 +683,11 @@ fun AntigravityNativeApp(
                             containerColor = MaterialTheme.colorScheme.background,
                             topBar = {
                                 ChatTopBar(
-                                    conversationTitle = uiState.snapshot.conversationTitle,
+                                    conversationTitle = if (uiState.isSwitchingConversation && uiState.switchingTargetTitle.isNotBlank()) {
+                                        uiState.switchingTargetTitle
+                                    } else {
+                                        uiState.snapshot.conversationTitle
+                                    },
                                     activeProject = uiState.activeProjectLabel,
                                     isNewChat = isNewChat,
                                     bridgeStatus = uiState.bridgeStatus,
@@ -575,9 +712,14 @@ fun AntigravityNativeApp(
                                         triggerHaptic()
                                         dismissKeyboardAndFocus()
                                         viewModel.setWorkspaceSheetOpen(true)
-                                        viewModel.onStartWorkspaceArtifactsLoad()
-                                        bridgeEngine.fetchWorkspaceOverview { items ->
-                                            viewModel.onWorkspaceArtifactsLoaded(items)
+                                        if (!isNewChat) {
+                                            viewModel.onStartWorkspaceArtifactsLoad()
+                                            scope.launch {
+                                                delay(180L)
+                                                bridgeEngine.fetchWorkspaceOverview { items ->
+                                                    viewModel.onWorkspaceArtifactsLoaded(items)
+                                                }
+                                            }
                                         }
                                     }
                                 )
@@ -619,7 +761,10 @@ fun AntigravityNativeApp(
                                         viewModel.setModelSheetOpen(true)
                                         if (uiState.snapshot.models.size <= 1) {
                                             viewModel.onStartModelRefresh()
-                                            bridgeEngine.refreshModels()
+                                            scope.launch {
+                                                delay(180L)
+                                                bridgeEngine.refreshModels()
+                                            }
                                         }
                                     },
                                     onOpenProjectSelector = { openProjectSelector() }
@@ -645,7 +790,10 @@ fun AntigravityNativeApp(
                                             viewModel.setModelSheetOpen(true)
                                             if (uiState.snapshot.models.size <= 1) {
                                                 viewModel.onStartModelRefresh()
-                                                bridgeEngine.refreshModels()
+                                                scope.launch {
+                                                    delay(180L)
+                                                    bridgeEngine.refreshModels()
+                                                }
                                             }
                                         },
                                         onRetryConnect = {
@@ -660,14 +808,74 @@ fun AntigravityNativeApp(
                                         }
                                     )
                                 } else {
+                                    val onToggleReasoning = remember(viewModel) {
+                                        { blockId: String, defaultExpanded: Boolean ->
+                                            triggerHaptic()
+                                            viewModel.toggleReasoningBlock(blockId, defaultExpanded)
+                                        }
+                                    }
+                                    val onExpandReasoningContent = remember(bridgeEngine) {
+                                        { blockId: String, blockTitle: String ->
+                                            bridgeEngine.expandReasoningBlock(blockId, blockTitle)
+                                        }
+                                    }
+                                    val onExpandReasoningStep = remember(bridgeEngine) {
+                                        { blockId: String, sectionId: String, stepId: String, stepTitle: String ->
+                                            bridgeEngine.expandReasoningStep(blockId, sectionId, stepId, stepTitle)
+                                        }
+                                    }
+                                    val onCopyMessageText = remember {
+                                        { text: String ->
+                                            triggerHaptic()
+                                            currentOnCopyToClipboard("Antigravity", text)
+                                            showToast("Copied to clipboard")
+                                        }
+                                    }
+                                    val onShareMessageText = remember {
+                                        { text: String ->
+                                            triggerHaptic()
+                                            currentOnShareText(text)
+                                        }
+                                    }
+                                    val onMessageLinkClick = remember {
+                                        { url: String -> handleLinkClick(url) }
+                                    }
+                                    val onMessageArtifactClick = remember(bridgeEngine) {
+                                        { artifact: ArtifactCard ->
+                                            val isDiffCard = artifact.addedLines != null ||
+                                                artifact.actionLabel.equals("Review", ignoreCase = true) ||
+                                                artifact.title.contains("files changed", ignoreCase = true) ||
+                                                artifact.title.contains("file changed", ignoreCase = true)
+                                            val isExternal = !isDiffCard && isExternalArtifactLink(
+                                                title = artifact.title,
+                                                subtitle = artifact.subtitle,
+                                                url = artifact.url
+                                            )
+                                            when {
+                                                isDiffCard -> openDiffReview(artifact.title)
+                                                artifact.url.startsWith("http", ignoreCase = true) -> {
+                                                    currentOnOpenExternalUrl(artifact.url)
+                                                }
+                                                isExternal -> {
+                                                    triggerHaptic()
+                                                    bridgeEngine.openExternalArtifact(artifact.title)
+                                                }
+                                                else -> openDocument(artifact.title)
+                                            }
+                                        }
+                                    }
+
+                                    val expandedReasoningState = remember(uiState.expandedReasoningIds) {
+                                        ExpandedReasoningState(uiState.expandedReasoningIds)
+                                    }
                                     LazyColumn(
                                         state = listState,
-                                        contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp),
+                                        contentPadding = PaddingValues(top = 8.dp, bottom = 20.dp),
                                         verticalArrangement = Arrangement.spacedBy(10.dp),
                                         modifier = Modifier.fillMaxSize()
                                     ) {
                                         if (hasOlderHeader) {
-                                            item(key = "load_older_header") {
+                                            item(key = "load_older_header", contentType = "header") {
                                                 Box(
                                                     modifier = Modifier
                                                         .fillMaxWidth()
@@ -728,55 +936,29 @@ fun AntigravityNativeApp(
                                                 }
                                             }
                                         }
-                                        items(displayedMessages, key = { it.id }) { message ->
+                                        items(
+                                            items = displayedMessages,
+                                            key = { it.id },
+                                            contentType = { message ->
+                                                if (message.role == MessageRole.USER) "user_message" else "assistant_message"
+                                            }
+                                        ) { message ->
                                             ChatMessageItem(
                                                 message = message,
                                                 fontScale = fontScale,
-                                                expandedReasoningIds = uiState.expandedReasoningIds,
+                                                expandedReasoningState = expandedReasoningState,
                                                 autoExpandReasoning = settings.autoExpandReasoning,
-                                                onToggleReasoning = { blockId, defaultExpanded ->
-                                                    triggerHaptic()
-                                                    viewModel.toggleReasoningBlock(blockId, defaultExpanded)
-                                                },
-                                                onExpandReasoningContent = { blockId, blockTitle ->
-                                                    bridgeEngine.expandReasoningBlock(blockId, blockTitle)
-                                                },
-                                                onCopyText = { text ->
-                                                    triggerHaptic()
-                                                    onCopyToClipboard("Antigravity", text)
-                                                    showToast("Copied to clipboard")
-                                                },
-                                                onShareText = { text ->
-                                                    triggerHaptic()
-                                                    onShareText(text)
-                                                },
-                                                onLinkClick = { url -> handleLinkClick(url) },
-                                                onArtifactClick = { artifact ->
-                                                    val isDiffCard = artifact.addedLines != null ||
-                                                        artifact.actionLabel.equals("Review", ignoreCase = true) ||
-                                                        artifact.title.contains("files changed", ignoreCase = true) ||
-                                                        artifact.title.contains("file changed", ignoreCase = true)
-                                                    val isExternal = !isDiffCard && isExternalArtifactLink(
-                                                        title = artifact.title,
-                                                        subtitle = artifact.subtitle,
-                                                        url = artifact.url
-                                                    )
-                                                    when {
-                                                        isDiffCard -> openDiffReview(artifact.title)
-                                                        artifact.url.startsWith("http", ignoreCase = true) -> {
-                                                            onOpenExternalUrl(artifact.url)
-                                                        }
-                                                        isExternal -> {
-                                                            triggerHaptic()
-                                                            bridgeEngine.openExternalArtifact(artifact.title)
-                                                        }
-                                                        else -> openDocument(artifact.title)
-                                                    }
-                                                }
+                                                onToggleReasoning = onToggleReasoning,
+                                                onExpandReasoningContent = onExpandReasoningContent,
+                                                onExpandReasoningStep = onExpandReasoningStep,
+                                                onCopyText = onCopyMessageText,
+                                                onShareText = onShareMessageText,
+                                                onLinkClick = onMessageLinkClick,
+                                                onArtifactClick = onMessageArtifactClick
                                             )
                                         }
-                                        item(key = "bottom_anchor") {
-                                            Spacer(modifier = Modifier.size(4.dp))
+                                        item(key = "bottom_anchor", contentType = "bottom_anchor") {
+                                            Spacer(modifier = Modifier.size(8.dp))
                                         }
                                     }
 
@@ -807,6 +989,8 @@ fun AntigravityNativeApp(
                                             Surface(
                                                 onClick = {
                                                     triggerHaptic()
+                                                    userScrolledAway = false
+                                                    wasPinnedToBottom = true
                                                     scope.launch {
                                                         listState.animateScrollToItem(bottomAnchorIndex)
                                                     }
@@ -932,12 +1116,25 @@ fun AntigravityNativeApp(
 
                     // Native Workspace & Thread Actions Bottom Sheet
                     if (uiState.isWorkspaceSheetOpen) {
+                        val isNewChatForSheet = displayedMessages.isEmpty() &&
+                            !uiState.isSwitchingConversation &&
+                            uiState.bridgeStatus != BridgeStatus.OFFLINE &&
+                            uiState.bridgeStatus != BridgeStatus.ERROR
                         WorkspaceAndActionsSheet(
                             conversationTitle = uiState.snapshot.conversationTitle,
                             permissionsPreset = uiState.snapshot.permissionsPreset,
                             artifacts = uiState.workspaceArtifacts,
                             isLoadingArtifacts = uiState.isLoadingWorkspaceArtifacts,
                             hasSidePanel = uiState.snapshot.hasSidePanel,
+                            isNewChat = isNewChatForSheet,
+                            webInspectorEnabled = settings.webInspectorMode,
+                            onToggleWebInspector = { enabled ->
+                                triggerHaptic()
+                                viewModel.setWebInspectorMode(enabled)
+                                if (enabled) {
+                                    viewModel.setWorkspaceSheetOpen(false)
+                                }
+                            },
                             onOpenDiffs = { openDiffReview() },
                             onOpenArtifact = { item ->
                                 when {

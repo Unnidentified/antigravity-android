@@ -120,7 +120,17 @@ fun PromptComposerBar(
                             )
                         }
 
-                        if (activeModelLabel.isNotBlank()) {
+                        val effortOnlyLabel = remember(activeModelLabel) {
+                            if (activeModelLabel.equals("Syncing…", ignoreCase = true)) {
+                                "Syncing…"
+                            } else {
+                                Regex("\\b(Minimal|Low|Medium|High|Extra|Fast)\\b", RegexOption.IGNORE_CASE)
+                                    .find(activeModelLabel)?.groupValues?.get(1)
+                                    ?.lowercase()?.replaceFirstChar { it.uppercase() }
+                                    ?: if (activeModelLabel.isNotBlank()) "Default" else ""
+                            }
+                        }
+                        if (effortOnlyLabel.isNotBlank()) {
                             Spacer(modifier = Modifier.width(8.dp))
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -130,7 +140,7 @@ fun PromptComposerBar(
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Text(
-                                    text = activeModelLabel,
+                                    text = effortOnlyLabel,
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -139,7 +149,7 @@ fun PromptComposerBar(
                                 Spacer(modifier = Modifier.width(2.dp))
                                 Icon(
                                     imageVector = Icons.Rounded.KeyboardArrowDown,
-                                    contentDescription = "Select model",
+                                    contentDescription = "Select effort level and model",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(16.dp)
                                 )
@@ -220,7 +230,7 @@ fun PromptComposerBar(
 
                         // Compact Antigravity ("agy") + Effort meter model selector trigger next to Send button
                         val effortFromModel = remember(activeModelLabel) {
-                            Regex("\\b(Low|Medium|High|Extra|Fast)\\b", RegexOption.IGNORE_CASE)
+                            Regex("\\b(Minimal|Low|Medium|High|Extra|Fast)\\b", RegexOption.IGNORE_CASE)
                                 .find(activeModelLabel)?.groupValues?.get(1) ?: "High"
                         }
                         Row(

@@ -7,7 +7,10 @@ package com.antigravity.wrapper.data
 object BridgeStateParser {
 
     private val TRAILING_TIER_PAREN_REGEX =
-        Regex("^(.+?)\\s*\\((Low|Medium|High|Extra|Fast)\\)\\s*$", RegexOption.IGNORE_CASE)
+        Regex("^(.+?)\\s*\\((Minimal|Low|Medium|High|Extra|Fast)\\)\\s*$", RegexOption.IGNORE_CASE)
+
+    private val TRAILING_ACTIVE_MODEL_NOTE_REGEX =
+        Regex("\\.\\s*Applies to messages sent after this turn\\.?$", RegexOption.IGNORE_CASE)
 
     fun normalizeModelNameAndTier(rawName: String, rawTier: String): Pair<String, String> {
         val cleanName = rawName.trim()
@@ -51,7 +54,7 @@ object BridgeStateParser {
                 id = id,
                 title = title,
                 url = SimpleJson.asString(obj["url"]).orEmpty(),
-                projectName = SimpleJson.asString(obj["projectName"]).orEmpty(),
+                projectName = SimpleJson.asString(obj["projectName"]).orEmpty().trim(),
                 preview = SimpleJson.asString(obj["preview"]).orEmpty(),
                 updatedLabel = SimpleJson.asString(obj["updatedLabel"]).orEmpty().trim(),
                 isActive = SimpleJson.asBoolean(obj["isActive"]) == true
@@ -87,17 +90,58 @@ object BridgeStateParser {
 
             val reasoning = SimpleJson.asArray(obj["reasoning"]).orEmpty().mapIndexedNotNull { rIdx, rEntry ->
                 val rObj = SimpleJson.asObject(rEntry) ?: return@mapIndexedNotNull null
-                val content = SimpleJson.asString(rObj["content"]).orEmpty().trim()
-                val title = SimpleJson.asString(rObj["title"])?.trim()?.takeIf { it.isNotBlank() }
-                    ?: "Reasoning"
-                if (content.isBlank() && title == "Reasoning") return@mapIndexedNotNull null
-                ReasoningBlock(
-                    id = SimpleJson.asString(rObj["id"])?.takeIf { it.isNotBlank() } ?: "r-$index-$rIdx",
-                    title = title,
-                    durationLabel = SimpleJson.asString(rObj["duration"]).orEmpty(),
-                    content = content,
-                    isStreaming = SimpleJson.asBoolean(rObj["isStreaming"]) == true
-                )
+                parseReasoningBlock(rObj, index, rIdx)
+            }
+            val reasoningById = if (reasoning.isNotEmpty()) {
+                HashMap<String, ReasoningBlock>(reasoning.size * 2).apply {
+                    for (block in reasoning) {
+                        put(block.id, block)
+                    }
+                }
+            } else {
+                emptyMap()
+            }
+
+            val segments = SimpleJson.asArray(obj["segments"]).orEmpty().mapIndexedNotNull { segIdx, segEntry ->
+                val segObj = SimpleJson.asObject(segEntry) ?: return@mapIndexedNotNull null
+                val segId = SimpleJson.asString(segObj["id"])?.takeIf { it.isNotBlank() }
+                    ?: "seg-$index-$segIdx"
+                val kindRaw = SimpleJson.asString(segObj["kind"]).orEmpty().lowercase()
+                when (kindRaw) {
+                    "reasoning" -> {
+                        val inlineObj = SimpleJson.asObject(segObj["reasoning"])
+                        val block = if (inlineObj != null) {
+                            parseReasoningBlock(inlineObj, index, segIdx)
+                        } else {
+                            val refId = SimpleJson.asString(segObj["reasoningId"]).orEmpty()
+                            reasoningById[refId]
+                        } ?: return@mapIndexedNotNull null
+                        AssistantSegment(
+                            id = segId,
+                            kind = AssistantSegmentKind.REASONING,
+                            reasoningBlock = block
+                        )
+                    }
+                    "markdown" -> {
+                        val segMd = SimpleJson.asString(segObj["markdown"]).orEmpty().trim()
+                        if (segMd.isBlank()) return@mapIndexedNotNull null
+                        AssistantSegment(
+                            id = segId,
+                            kind = AssistantSegmentKind.MARKDOWN,
+                            markdown = segMd
+                        )
+                    }
+                    else -> null
+                }
+            }
+
+            val effectiveMarkdown = markdown.ifBlank {
+                segments.asSequence()
+                    .filter { it.kind == AssistantSegmentKind.MARKDOWN && it.markdown.isNotBlank() }
+                    .joinToString("\n\n") { it.markdown }
+            }
+            val effectiveReasoning = reasoning.ifEmpty {
+                segments.mapNotNull { it.reasoningBlock }
             }
 
             val artifacts = SimpleJson.asArray(obj["artifacts"]).orEmpty().mapIndexedNotNull { aIdx, aEntry ->
@@ -115,18 +159,20 @@ object BridgeStateParser {
                 )
             }
 
-            if (markdown.isBlank() && reasoning.isEmpty() && artifacts.isEmpty()) {
+            val isMsgStreaming = SimpleJson.asBoolean(obj["isStreaming"]) == true
+            if (effectiveMarkdown.isBlank() && effectiveReasoning.isEmpty() && segments.isEmpty() && artifacts.isEmpty() && !isMsgStreaming) {
                 return@mapIndexedNotNull null
             }
 
             ChatMessage(
                 id = SimpleJson.asString(obj["id"])?.takeIf { it.isNotBlank() } ?: "msg-$index",
                 role = role,
-                markdownContent = markdown,
+                markdownContent = effectiveMarkdown,
                 timestampLabel = SimpleJson.asString(obj["timestamp"]).orEmpty().trim(),
-                reasoningBlocks = reasoning,
+                reasoningBlocks = effectiveReasoning,
                 artifacts = artifacts,
-                isStreaming = SimpleJson.asBoolean(obj["isStreaming"]) == true
+                isStreaming = isMsgStreaming,
+                segments = segments
             )
         }
 
@@ -163,7 +209,7 @@ object BridgeStateParser {
         }
 
         val rawActiveModel = SimpleJson.asString(root["activeModel"]).orEmpty()
-            .replace(Regex("\\.\\s*Applies to messages sent after this turn\\.?$", RegexOption.IGNORE_CASE), "")
+            .replace(TRAILING_ACTIVE_MODEL_NOTE_REGEX, "")
             .trim()
         val cleanActiveModel = if (rawActiveModel.equals("No Model Selected", ignoreCase = true) ||
             rawActiveModel.equals("Select model", ignoreCase = true)
@@ -213,6 +259,61 @@ object BridgeStateParser {
         )
     }
 
+    private fun parseReasoningBlock(
+        rObj: Map<String, Any?>,
+        msgIndex: Int,
+        rIdx: Int
+    ): ReasoningBlock? {
+        val content = SimpleJson.asString(rObj["content"]).orEmpty().trim()
+        val title = SimpleJson.asString(rObj["title"])?.trim()?.takeIf { it.isNotBlank() }
+            ?: "Worked"
+        val sections = SimpleJson.asArray(rObj["sections"]).orEmpty().mapIndexedNotNull { sIdx, sEntry ->
+            val sObj = SimpleJson.asObject(sEntry) ?: return@mapIndexedNotNull null
+            val steps = SimpleJson.asArray(sObj["steps"]).orEmpty().mapIndexedNotNull { stIdx, stEntry ->
+                val stObj = SimpleJson.asObject(stEntry) ?: return@mapIndexedNotNull null
+                val stTitle = SimpleJson.asString(stObj["title"])?.trim()?.takeIf { it.isNotBlank() }
+                    ?: return@mapIndexedNotNull null
+                val kindRaw = SimpleJson.asString(stObj["kind"]).orEmpty().lowercase()
+                val kind = when (kindRaw) {
+                    "command" -> ReasoningStepKind.COMMAND
+                    "file" -> ReasoningStepKind.FILE
+                    "section" -> ReasoningStepKind.SECTION
+                    else -> ReasoningStepKind.NOTE
+                }
+                ReasoningStepItem(
+                    id = SimpleJson.asString(stObj["id"])?.takeIf { it.isNotBlank() }
+                        ?: "st-$msgIndex-$rIdx-$sIdx-$stIdx",
+                    title = stTitle,
+                    kind = kind,
+                    detail = SimpleJson.asString(stObj["detail"]).orEmpty().trim(),
+                    fileName = SimpleJson.asString(stObj["fileName"]).orEmpty().trim(),
+                    lineRange = SimpleJson.asString(stObj["lineRange"]).orEmpty().trim(),
+                    badgeText = SimpleJson.asString(stObj["badgeText"]).orEmpty().trim(),
+                    actionVerb = SimpleJson.asString(stObj["actionVerb"]).orEmpty().trim(),
+                    isExpandable = SimpleJson.asBoolean(stObj["isExpandable"]) == true
+                )
+            }
+            val secTitle = SimpleJson.asString(sObj["title"]).orEmpty().trim()
+            if (secTitle.isBlank() && steps.isEmpty()) return@mapIndexedNotNull null
+            ReasoningSection(
+                id = SimpleJson.asString(sObj["id"])?.takeIf { it.isNotBlank() }
+                    ?: "sec-$msgIndex-$rIdx-$sIdx",
+                title = secTitle,
+                steps = steps,
+                defaultExpanded = SimpleJson.asBoolean(sObj["defaultExpanded"]) == true
+            )
+        }
+        if (content.isBlank() && sections.isEmpty() && title == "Worked") return null
+        return ReasoningBlock(
+            id = SimpleJson.asString(rObj["id"])?.takeIf { it.isNotBlank() } ?: "r-$msgIndex-$rIdx",
+            title = title,
+            durationLabel = SimpleJson.asString(rObj["duration"]).orEmpty(),
+            content = content,
+            sections = sections,
+            isStreaming = SimpleJson.asBoolean(rObj["isStreaming"]) == true
+        )
+    }
+
     fun parseDiffReview(json: String?): DiffReviewData {
         if (json.isNullOrBlank()) return DiffReviewData(error = "No diff data returned")
         val root = try {
@@ -259,6 +360,15 @@ object BridgeStateParser {
         )
     }
 
+    fun extractExternalLink(errorOrUrl: String?): String? {
+        val raw = errorOrUrl?.trim().orEmpty()
+        if (raw.startsWith("EXTERNAL_LINK:", ignoreCase = true)) {
+            val url = raw.substringAfter(':').trim()
+            return url.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+        }
+        return null
+    }
+
     fun parseDocumentViewer(json: String?): DocumentViewerData {
         if (json.isNullOrBlank()) return DocumentViewerData(error = "No document content returned")
         val root = try {
@@ -271,12 +381,25 @@ object BridgeStateParser {
         val md = SimpleJson.asString(root["markdown"]).orEmpty().trim()
         val raw = SimpleJson.asString(root["raw"]).orEmpty().trim()
         val err = SimpleJson.asString(root["error"])?.takeIf { it.isNotBlank() }
+        val externalUrl = SimpleJson.asString(root["externalUrl"])
+            ?.trim()
+            ?.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+            ?: extractExternalLink(err)
+        val resolvedError = if (md.isBlank() && raw.isBlank()) {
+            when {
+                externalUrl != null -> "EXTERNAL_LINK:$externalUrl"
+                err != null -> err
+                else -> "Document is empty or environment is paused"
+            }
+        } else {
+            null
+        }
         return DocumentViewerData(
             title = title.ifBlank { "Document" },
             markdownContent = md,
             rawContent = raw.ifBlank { md },
             isLoading = false,
-            error = if (md.isBlank() && raw.isBlank()) (err ?: "Document is empty or environment is paused") else null
+            error = resolvedError
         )
     }
 

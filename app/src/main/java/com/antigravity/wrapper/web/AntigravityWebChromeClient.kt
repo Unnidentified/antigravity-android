@@ -1,6 +1,8 @@
 package com.antigravity.wrapper.web
 
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.view.View
 import android.webkit.PermissionRequest
@@ -9,6 +11,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Custom [WebChromeClient] handling loading progress, page title updates, native file uploads via
@@ -72,22 +75,53 @@ class AntigravityWebChromeClient(
 
         // Use a lightweight transient WebView to resolve the target URL of window.open / target="_blank"
         // and then route it through UrlRouter (in-app vs Chrome Custom Tabs).
-        val transientWebView = WebView(parentWebView.context).apply {
+        val mainHandler = Handler(Looper.getMainLooper())
+        val disposed = AtomicBoolean(false)
+        lateinit var transientWebView: WebView
+        val cleanupRunnable = Runnable {
+            if (disposed.compareAndSet(false, true)) {
+                transientWebView.stopLoading()
+                transientWebView.destroy()
+            }
+        }
+        fun scheduleDestroy() {
+            if (disposed.compareAndSet(false, true)) {
+                mainHandler.removeCallbacks(cleanupRunnable)
+                transientWebView.post {
+                    transientWebView.stopLoading()
+                    transientWebView.destroy()
+                }
+            }
+        }
+
+        transientWebView = WebView(parentWebView.context).apply {
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(
                     childView: WebView?,
                     request: WebResourceRequest?
                 ): Boolean {
                     val targetUrl = request?.url?.toString()
+                    if (UrlRouter.isBlankOrEmpty(targetUrl)) {
+                        // Ignore initial synthetic about:blank load; wait for real redirect or timeout cleanup
+                        return false
+                    }
                     if (!targetUrl.isNullOrBlank()) {
                         onPopupUrlResolved(targetUrl)
                     }
-                    childView?.destroy()
+                    scheduleDestroy()
                     return true
+                }
+
+                override fun onPageFinished(childView: WebView?, url: String?) {
+                    super.onPageFinished(childView, url)
+                    if (!UrlRouter.isBlankOrEmpty(url)) {
+                        scheduleDestroy()
+                    }
                 }
             }
         }
 
+        mainHandler.postDelayed(cleanupRunnable, 4_000L)
         transport.webView = transientWebView
         resultMsg.sendToTarget()
         return true

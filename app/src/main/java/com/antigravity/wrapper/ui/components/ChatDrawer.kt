@@ -1,6 +1,8 @@
 package com.antigravity.wrapper.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,20 +22,21 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.Surface
@@ -46,8 +49,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.antigravity.wrapper.data.BridgeStatus
 import com.antigravity.wrapper.data.ChatConversation
 import com.antigravity.wrapper.data.QuotaInfo
@@ -65,15 +72,29 @@ fun ChatDrawerSheet(
     onOpenSettings: () -> Unit
 ) {
     var searchQuery by remember { mutableStateOf("") }
+    var collapsedProjects by remember { mutableStateOf(emptySet<String>()) }
 
     val filtered = remember(conversations, searchQuery) {
         if (searchQuery.isBlank()) {
             conversations
         } else {
             val q = searchQuery.trim()
-            conversations.filter { it.title.contains(q, ignoreCase = true) }
+            conversations.filter {
+                it.title.contains(q, ignoreCase = true) ||
+                    it.projectName.contains(q, ignoreCase = true)
+            }
         }
     }
+
+    val projectGroups = remember(filtered) {
+        filtered
+            .filter { it.projectName.isNotBlank() }
+            .groupBy { it.projectName.trim() }
+    }
+    val standaloneConversations = remember(filtered) {
+        filtered.filter { it.projectName.isBlank() }
+    }
+    val isSearching = searchQuery.isNotBlank()
 
     ModalDrawerSheet(
         drawerContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -86,22 +107,14 @@ fun ChatDrawerSheet(
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            // Header row: Refresh button dead-centered vertically against the 2-line Antigravity / Status title
+            // Header row: borderless AgyLogo + Antigravity/Status + Refresh & Settings icons
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                    contentAlignment = Alignment.Center
-                ) {
-                    AgyLogo(modifier = Modifier.size(22.dp))
-                }
+                AgyLogo(modifier = Modifier.size(26.dp))
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
@@ -121,7 +134,7 @@ fun ChatDrawerSheet(
                 }
                 Box(
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(40.dp)
                         .clip(CircleShape)
                         .clickable(onClick = onRefreshChats),
                     contentAlignment = Alignment.Center
@@ -130,105 +143,115 @@ fun ChatDrawerSheet(
                         imageVector = Icons.Rounded.Refresh,
                         contentDescription = "Refresh chats",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(2.dp))
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onOpenSettings),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Settings,
+                        contentDescription = "Settings",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            Button(
-                onClick = onNewChat,
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(46.dp)
+            // Search bar + minimal borderless "+" New Chat button on the right
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Add,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("New Chat", style = MaterialTheme.typography.labelLarge)
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Sleek filled pill search bar (no thick outlined box)
-            Surface(
-                shape = RoundedCornerShape(999.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(42.dp)
-            ) {
-                Row(
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .weight(1f)
+                        .height(42.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Search,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Box(
-                        modifier = Modifier.weight(1f),
-                        contentAlignment = Alignment.CenterStart
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        BasicTextField(
-                            value = searchQuery,
-                            onValueChange = { searchQuery = it },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                color = MaterialTheme.colorScheme.onSurface
-                            ),
-                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                            modifier = Modifier.fillMaxWidth(),
-                            decorationBox = { innerTextField ->
-                                Box(contentAlignment = Alignment.CenterStart) {
-                                    if (searchQuery.isEmpty()) {
-                                        Text(
-                                            text = "Search chats…",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
-                                        )
-                                    }
-                                    innerTextField()
-                                }
-                            }
+                        Icon(
+                            imageVector = Icons.Rounded.Search,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
                         )
-                    }
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(
-                            onClick = { searchQuery = "" },
-                            modifier = Modifier.size(28.dp)
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Box(
+                            modifier = Modifier.weight(1f),
+                            contentAlignment = Alignment.CenterStart
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Close,
-                                contentDescription = "Clear",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(16.dp)
+                            BasicTextField(
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it },
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                    color = MaterialTheme.colorScheme.onSurface
+                                ),
+                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                modifier = Modifier.fillMaxWidth(),
+                                decorationBox = { innerTextField ->
+                                    Box(contentAlignment = Alignment.CenterStart) {
+                                        if (searchQuery.isEmpty()) {
+                                            Text(
+                                                text = "Search chats…",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
+                                            )
+                                        }
+                                        innerTextField()
+                                    }
+                                }
                             )
                         }
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(
+                                onClick = { searchQuery = "" },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Close,
+                                    contentDescription = "Clear",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
                     }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onNewChat),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = "New Chat",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            Text(
-                text = "CONVERSATIONS",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(start = 14.dp, bottom = 6.dp)
-            )
-
-            // Conversations list aligned on the exact same 14dp inner icon axis as the Search field and footer cards
             if (filtered.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -260,54 +283,60 @@ fun ChatDrawerSheet(
                     contentPadding = PaddingValues(vertical = 2.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    items(filtered, key = { it.id }) { conversation ->
-                        val bgColor = if (conversation.isActive) {
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
-                        } else {
-                            MaterialTheme.colorScheme.surfaceContainerLow
+                    if (projectGroups.isNotEmpty()) {
+                        item(key = "section_projects", contentType = "section_header") {
+                            DrawerSectionHeader(title = "PROJECTS")
                         }
-                        val contentColor = if (conversation.isActive) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(bgColor)
-                                .clickable { onSelectConversation(conversation) }
-                                .padding(horizontal = 14.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.ChatBubbleOutline,
-                                contentDescription = null,
-                                tint = if (conversation.isActive) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = conversation.title,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = contentColor,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
-                            )
-                            if (conversation.updatedLabel.isNotBlank()) {
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = conversation.updatedLabel,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1
+
+                        projectGroups.forEach { (projectName, projectChats) ->
+                            val isCollapsed = !isSearching && collapsedProjects.contains(projectName)
+                            item(key = "project_header_$projectName", contentType = "project_header") {
+                                ProjectGroupHeaderRow(
+                                    projectName = projectName,
+                                    chatCount = projectChats.size,
+                                    isExpanded = !isCollapsed,
+                                    onToggle = {
+                                        collapsedProjects = if (collapsedProjects.contains(projectName)) {
+                                            collapsedProjects - projectName
+                                        } else {
+                                            collapsedProjects + projectName
+                                        }
+                                    }
                                 )
                             }
+                            if (!isCollapsed) {
+                                items(
+                                    items = projectChats,
+                                    key = { "proj_${projectName}_${it.id}" },
+                                    contentType = { "conversation_row" }
+                                ) { conversation ->
+                                    DrawerConversationRow(
+                                        conversation = conversation,
+                                        indented = true,
+                                        onClick = { onSelectConversation(conversation) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (standaloneConversations.isNotEmpty()) {
+                        item(key = "section_conversations", contentType = "section_header") {
+                            DrawerSectionHeader(
+                                title = "CONVERSATIONS",
+                                topPadding = if (projectGroups.isNotEmpty()) 12.dp else 0.dp
+                            )
+                        }
+                        items(
+                            items = standaloneConversations,
+                            key = { "conv_${it.id}" },
+                            contentType = { "conversation_row" }
+                        ) { conversation ->
+                            DrawerConversationRow(
+                                conversation = conversation,
+                                indented = false,
+                                onClick = { onSelectConversation(conversation) }
+                            )
                         }
                     }
                 }
@@ -318,7 +347,7 @@ fun ChatDrawerSheet(
                 modifier = Modifier.padding(vertical = 10.dp)
             )
 
-            // Usage & Quota Footer Card — consistent icon + text-column alignment
+            // Usage & Quota Footer Card
             Surface(
                 onClick = onOpenQuota,
                 shape = RoundedCornerShape(16.dp),
@@ -386,49 +415,166 @@ fun ChatDrawerSheet(
                         val barLeft = quota.headlineLeftPercent
                         if (barLeft != null) {
                             Spacer(modifier = Modifier.height(8.dp))
-                            LinearProgressIndicator(
-                                progress = { (barLeft / 100f).coerceIn(0f, 1f) },
-                                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                drawStopIndicator = {},
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(5.dp)
-                                    .clip(RoundedCornerShape(999.dp))
+                            SharpQuotaProgressBar(
+                                leftPercent = barLeft,
+                                barHeight = 9.dp,
+                                textSize = 12.sp,
+                                textColor = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.fillMaxWidth()
                             )
                         }
                     }
                 }
             }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(8.dp))
+@Composable
+private fun DrawerSectionHeader(
+    title: String,
+    topPadding: androidx.compose.ui.unit.Dp = 0.dp
+) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.labelSmall.copy(
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.8.sp
+        ),
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 12.dp, top = topPadding, bottom = 4.dp)
+    )
+}
 
-            // Settings Footer Card matching the exact Usage & Quota card container & alignment grid
-            Surface(
-                onClick = onOpenSettings,
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Settings,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = "Settings",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-            }
+@Composable
+private fun ProjectGroupHeaderRow(
+    projectName: String,
+    chatCount: Int,
+    isExpanded: Boolean,
+    onToggle: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = if (isExpanded) Icons.Rounded.FolderOpen else Icons.Rounded.Folder,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = projectName,
+            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = chatCount.toString(),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Icon(
+            imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+            contentDescription = if (isExpanded) "Collapse project" else "Expand project",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp)
+        )
+    }
+}
+
+@Composable
+private fun DrawerConversationRow(
+    conversation: ChatConversation,
+    indented: Boolean,
+    onClick: () -> Unit
+) {
+    val rowShape = RoundedCornerShape(14.dp)
+    val isActive = conversation.isActive
+    val bgColor = if (isActive) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        Color.Transparent
+    }
+    val contentColor = if (isActive) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+    val secondaryColor = if (isActive) {
+        MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.88f)
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val borderModifier = if (isActive) {
+        Modifier.border(
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
+            shape = rowShape
+        )
+    } else {
+        Modifier
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = if (indented) 14.dp else 0.dp)
+            .clip(rowShape)
+            .background(bgColor)
+            .then(borderModifier)
+            .clickable(onClick = onClick)
+            .padding(
+                start = if (isActive) 8.dp else 12.dp,
+                end = 12.dp,
+                top = 11.dp,
+                bottom = 11.dp
+            ),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (isActive) {
+            Box(
+                modifier = Modifier
+                    .width(3.5.dp)
+                    .height(18.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Icon(
+            imageVector = Icons.Rounded.ChatBubbleOutline,
+            contentDescription = null,
+            tint = secondaryColor,
+            modifier = Modifier.size(17.dp)
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = conversation.title,
+            style = MaterialTheme.typography.bodyMedium.copy(
+                fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal
+            ),
+            color = contentColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (conversation.updatedLabel.isNotBlank()) {
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = conversation.updatedLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = secondaryColor,
+                maxLines = 1
+            )
         }
     }
 }

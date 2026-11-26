@@ -15,6 +15,7 @@ import com.antigravity.wrapper.data.ModelOption
 import com.antigravity.wrapper.data.QuickPrompt
 import com.antigravity.wrapper.data.ThemeMode
 import com.antigravity.wrapper.data.WorkspaceArtifactItem
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -50,6 +51,7 @@ data class ChatUiState(
     val quotaStatusMessage: String? = null,
     val isSwitchingConversation: Boolean = false,
     val switchingFromUrl: String? = null,
+    val switchingTargetTitle: String = "",
     val errorMessage: String? = null,
     val lastSyncTimeMillis: Long = 0L
 ) {
@@ -57,11 +59,15 @@ data class ChatUiState(
         get() {
             if (isSwitchingConversation) return emptyList()
             if (optimisticMessages.isEmpty()) return snapshot.messages
-            val serverUserTexts = snapshot.messages
+            val serverUserCounts = snapshot.messages
+                .asSequence()
                 .filter { it.role == MessageRole.USER }
-                .map { it.markdownContent.trim() }
-                .toSet()
-            val pending = optimisticMessages.filterNot { it.markdownContent.trim() in serverUserTexts }
+                .groupingBy { it.markdownContent.trim() }
+                .eachCount()
+            val pending = optimisticMessages.filter { opt ->
+                val count = serverUserCounts[opt.markdownContent.trim()] ?: 0
+                count <= opt.optimisticBaselineCount
+            }
             return snapshot.messages + pending
         }
 
@@ -125,6 +131,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile
     private var modelMutationLockUntilMs: Long = 0L
 
+    private var conversationSwitchJob: Job? = null
+    private var loadOlderJob: Job? = null
+    private var modelOptimisticJob: Job? = null
+
+    @Volatile
+    private var loadOlderBaselineCount: Int = 0
+
+    @Volatile
+    private var loadOlderBaselineFirstSig: String = ""
+
+    @Volatile
+    private var switchingTargetUrl: String = ""
+
+    @Volatile
+    private var switchingFromTitle: String = ""
+
+    @Volatile
+    private var switchingUrlChangedAtMs: Long = 0L
+
     fun onBridgeSnapshot(snapshot: BridgeSnapshot) {
         if (snapshot.activeProject.isNotBlank()) {
             repository.saveCachedProject(snapshot.activeProject)
@@ -143,38 +168,83 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (snapshot.quota.isLiveFromServer && snapshot.quota.headlineLeftPercent != null) {
             repository.saveCachedQuota(snapshot.quota)
         }
+        var shouldCancelSwitchJob = false
+        var shouldCancelLoadOlderJob = false
+        var shouldCancelModelJob = false
         _uiState.update { current ->
             val nextStatus = when {
                 snapshot.authRequired -> BridgeStatus.AUTH_REQUIRED
                 else -> BridgeStatus.CONNECTED
             }
-            val serverUserTexts = snapshot.messages
+            val serverUserCounts = snapshot.messages
+                .asSequence()
                 .filter { it.role == MessageRole.USER }
-                .map { it.markdownContent.trim() }
-                .toSet()
-            val remainingOptimistic = current.optimisticMessages.filterNot {
-                it.markdownContent.trim() in serverUserTexts
+                .groupingBy { it.markdownContent.trim() }
+                .eachCount()
+            val remainingOptimistic = current.optimisticMessages.filter { opt ->
+                val count = serverUserCounts[opt.markdownContent.trim()] ?: 0
+                count <= opt.optimisticBaselineCount
             }
             val expectedOptimistic = current.optimisticModelLabel?.trim().orEmpty()
             val incomingMatchesOptimistic = expectedOptimistic.isNotEmpty() &&
                 snapshot.activeModelName.equals(expectedOptimistic, ignoreCase = true)
             val clearOptimisticModel = expectedOptimistic.isNotEmpty() &&
                 (incomingMatchesOptimistic || (!modelHoldActive && snapshot.activeModelName.isNotBlank()))
+            if (clearOptimisticModel) {
+                shouldCancelModelJob = true
+            }
 
-            val arrivedAtNewThread = current.isSwitchingConversation &&
-                snapshot.messages.isNotEmpty() &&
-                (current.switchingFromUrl.isNullOrBlank() || snapshot.currentUrl != current.switchingFromUrl)
+            val fromUrl = current.switchingFromUrl?.trim().orEmpty()
+            val incomingUrl = snapshot.currentUrl.trim()
+            val urlChanged = fromUrl.isNotEmpty() && incomingUrl.isNotEmpty() && incomingUrl != fromUrl
+            val targetUrl = switchingTargetUrl
+            val reachedTargetUrl = targetUrl.isNotEmpty() && incomingUrl == targetUrl
+            val targetTitle = current.switchingTargetTitle.trim()
+            val incomingTitle = snapshot.conversationTitle.trim()
+            val titleChangedToTarget = targetTitle.isNotEmpty() &&
+                incomingTitle.equals(targetTitle, ignoreCase = true) &&
+                !incomingTitle.equals(switchingFromTitle, ignoreCase = true)
+            val routeChanged = urlChanged || reachedTargetUrl || titleChangedToTarget
+            if (current.isSwitchingConversation && routeChanged && switchingUrlChangedAtMs == 0L) {
+                switchingUrlChangedAtMs = now
+            }
+            val routeSettleElapsed = switchingUrlChangedAtMs > 0L && (now - switchingUrlChangedAtMs) >= 1_400L
+            val arrivedAtNewThread = current.isSwitchingConversation && (
+                (routeChanged && (snapshot.messages.isNotEmpty() || routeSettleElapsed)) ||
+                    (fromUrl.isEmpty() && targetUrl.isEmpty() && snapshot.messages.isNotEmpty())
+                )
+            if (arrivedAtNewThread) {
+                shouldCancelSwitchJob = true
+                switchingTargetUrl = ""
+                switchingFromTitle = ""
+                switchingUrlChangedAtMs = 0L
+            }
             val stillSwitching = if (arrivedAtNewThread) false else current.isSwitchingConversation
 
+            val incomingFirstSig = snapshot.messages.firstOrNull()?.let { first ->
+                "${first.id}:${first.markdownContent.length}:${first.reasoningBlocks.sumOf { it.sections.size }}"
+            }.orEmpty()
+            val loadingOlderResolved = current.isLoadingOlderMessages &&
+                (arrivedAtNewThread ||
+                    snapshot.messages.size > loadOlderBaselineCount ||
+                    (loadOlderBaselineFirstSig.isNotEmpty() && incomingFirstSig != loadOlderBaselineFirstSig) ||
+                    !snapshot.hasOlderMessages)
+            if (loadingOlderResolved) {
+                shouldCancelLoadOlderJob = true
+            }
+            val stillLoadingOlder = if (current.isLoadingOlderMessages) !loadingOlderResolved else false
+
             // Preserve last non-empty conversations, models, projects, and quota across partial route snapshots
-            val cleanUrl = snapshot.currentUrl.substringBefore('?').substringBefore('#')
+            val cleanUrl = snapshot.currentUrl.trim()
             val mergedConversations = if (snapshot.conversations.isNotEmpty()) {
                 snapshot.conversations
             } else {
                 current.snapshot.conversations.map { conv ->
-                    val convUrl = conv.url.substringBefore('?').substringBefore('#')
-                    val active = (convUrl.isNotBlank() && convUrl == cleanUrl) ||
-                        (snapshot.conversationTitle != "Antigravity" && conv.title == snapshot.conversationTitle)
+                    val convUrl = conv.url.trim()
+                    val active = when {
+                        convUrl.isNotEmpty() && cleanUrl.isNotEmpty() -> convUrl == cleanUrl
+                        else -> snapshot.conversationTitle != "Antigravity" && conv.title == snapshot.conversationTitle
+                    }
                     if (conv.isActive != active) conv.copy(isActive = active) else conv
                 }
             }
@@ -199,14 +269,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 snapshot.activeModelName
             }
             val effectiveModels = if (modelHoldActive && expectedOptimistic.isNotEmpty()) {
+                val effortMatch = TRAILING_EFFORT_REGEX.find(expectedOptimistic)
+                val parsedEffort = effortMatch?.let { m ->
+                    m.groupValues[1].ifBlank { m.groupValues[2] }
+                }?.takeIf { it.isNotBlank() }
+                val expectedBaseName = TRAILING_EFFORT_REGEX.replace(expectedOptimistic, "").trim()
                 mergedModels.map { m ->
-                    val sel = expectedOptimistic.startsWith(m.name, ignoreCase = true)
-                    val effort = if (sel) {
-                        Regex("\\b(Low|Medium|High|Extra|Fast)\\b", RegexOption.IGNORE_CASE)
-                            .find(expectedOptimistic)?.groupValues?.get(1) ?: m.tier
-                    } else {
-                        m.tier
-                    }
+                    val sel = m.name.equals(expectedBaseName, ignoreCase = true) ||
+                        m.name.equals(expectedOptimistic, ignoreCase = true)
+                    val effort = if (sel) (parsedEffort ?: m.tier) else m.tier
                     m.copy(isSelected = sel, tier = effort)
                 }
             } else {
@@ -236,11 +307,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 isSwitchingConversation = stillSwitching,
                 switchingFromUrl = if (stillSwitching) current.switchingFromUrl else null,
-                isLoadingOlderMessages = false,
+                switchingTargetTitle = if (stillSwitching) current.switchingTargetTitle else "",
+                isLoadingOlderMessages = stillLoadingOlder,
                 errorMessage = null,
                 lastSyncTimeMillis = now
             )
         }
+        if (shouldCancelSwitchJob) conversationSwitchJob?.cancel()
+        if (shouldCancelLoadOlderJob) loadOlderJob?.cancel()
+        if (shouldCancelModelJob) modelOptimisticJob?.cancel()
     }
 
     fun onBridgeNavigatingToAuth() {
@@ -257,13 +332,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onBridgeError(description: String?, isOffline: Boolean) {
+        conversationSwitchJob?.cancel()
+        loadOlderJob?.cancel()
+        switchingTargetUrl = ""
+        switchingFromTitle = ""
+        switchingUrlChangedAtMs = 0L
         _uiState.update {
             it.copy(
                 bridgeStatus = if (isOffline) BridgeStatus.OFFLINE else BridgeStatus.ERROR,
                 isRefreshingModels = false,
                 isRefreshingQuota = false,
                 isSwitchingConversation = false,
+                isLoadingOlderMessages = false,
                 switchingFromUrl = null,
+                switchingTargetTitle = "",
                 errorMessage = description ?: if (isOffline) "No internet connection" else "Unable to connect to Antigravity"
             )
         }
@@ -278,21 +360,41 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun onStartConversationSwitch() {
+    fun onStartConversationSwitch(targetUrl: String = "", targetTitle: String = "") {
+        conversationSwitchJob?.cancel()
+        loadOlderJob?.cancel()
+        switchingTargetUrl = targetUrl.trim()
+        switchingFromTitle = _uiState.value.snapshot.conversationTitle.trim()
+        switchingUrlChangedAtMs = 0L
         _uiState.update {
             it.copy(
                 optimisticMessages = emptyList(),
                 optimisticModelLabel = null,
                 isSwitchingConversation = true,
-                switchingFromUrl = it.snapshot.currentUrl
+                isLoadingOlderMessages = false,
+                switchingFromUrl = it.snapshot.currentUrl,
+                switchingTargetTitle = targetTitle.trim()
             )
         }
-        viewModelScope.launch {
-            delay(3_500L)
+        conversationSwitchJob = viewModelScope.launch {
+            val startedAt = System.currentTimeMillis()
+            while (true) {
+                delay(250L)
+                val nowMs = System.currentTimeMillis()
+                val routeAt = switchingUrlChangedAtMs
+                val routeSettled = routeAt > 0L && (nowMs - routeAt) >= 1_400L
+                if (routeSettled || (nowMs - startedAt) >= 5_000L) {
+                    break
+                }
+            }
+            switchingTargetUrl = ""
+            switchingFromTitle = ""
+            switchingUrlChangedAtMs = 0L
             _uiState.update {
                 it.copy(
                     isSwitchingConversation = false,
-                    switchingFromUrl = null
+                    switchingFromUrl = null,
+                    switchingTargetTitle = ""
                 )
             }
         }
@@ -313,6 +415,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             modelName
         }
         modelMutationLockUntilMs = System.currentTimeMillis() + 2_200L
+        modelOptimisticJob?.cancel()
         repository.saveCachedModel(label)
         _uiState.update { state ->
             val updatedModels = state.snapshot.models.map { m ->
@@ -331,7 +434,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
         }
-        viewModelScope.launch {
+        modelOptimisticJob = viewModelScope.launch {
             delay(2_400L)
             _uiState.update { it.copy(optimisticModelLabel = null) }
         }
@@ -375,27 +478,54 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun addOptimisticUserMessage(text: String) {
         val clean = text.trim()
         if (clean.isEmpty()) return
-        val optimistic = ChatMessage(
-            id = "opt-${UUID.randomUUID()}",
-            role = MessageRole.USER,
-            markdownContent = clean,
-            isOptimistic = true
-        )
+        val optId = "opt-${UUID.randomUUID()}"
         _composerText.value = ""
-        _uiState.update {
-            it.copy(
-                optimisticMessages = it.optimisticMessages + optimistic
+        _uiState.update { current ->
+            val serverCount = current.snapshot.messages.count {
+                it.role == MessageRole.USER && it.markdownContent.trim() == clean
+            }
+            val pendingCount = current.optimisticMessages.count {
+                it.markdownContent.trim() == clean
+            }
+            val optimistic = ChatMessage(
+                id = optId,
+                role = MessageRole.USER,
+                markdownContent = clean,
+                isOptimistic = true,
+                optimisticBaselineCount = serverCount + pendingCount
             )
+            current.copy(
+                optimisticMessages = current.optimisticMessages + optimistic
+            )
+        }
+        viewModelScope.launch {
+            delay(20_000L)
+            _uiState.update { current ->
+                if (current.optimisticMessages.any { it.id == optId }) {
+                    current.copy(
+                        optimisticMessages = current.optimisticMessages.filterNot { it.id == optId }
+                    )
+                } else {
+                    current
+                }
+            }
         }
     }
 
     fun startNewChatOptimistic() {
+        conversationSwitchJob?.cancel()
+        loadOlderJob?.cancel()
+        switchingTargetUrl = ""
+        switchingFromTitle = ""
+        switchingUrlChangedAtMs = 0L
         _composerText.value = ""
         _uiState.update {
             it.copy(
                 optimisticMessages = emptyList(),
                 isSwitchingConversation = false,
+                isLoadingOlderMessages = false,
                 switchingFromUrl = null,
+                switchingTargetTitle = "",
                 snapshot = it.snapshot.copy(
                     conversationTitle = "Antigravity",
                     messages = emptyList(),
@@ -440,15 +570,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun setPermissionsSheetOpen(open: Boolean) = _uiState.update { it.copy(isPermissionsSheetOpen = open) }
 
     fun onStartLoadOlderMessages() {
+        loadOlderJob?.cancel()
+        val currentMsgs = _uiState.value.snapshot.messages
+        loadOlderBaselineCount = currentMsgs.size
+        loadOlderBaselineFirstSig = currentMsgs.firstOrNull()?.let { first ->
+            "${first.id}:${first.markdownContent.length}:${first.reasoningBlocks.sumOf { it.sections.size }}"
+        }.orEmpty()
         _uiState.update {
-            it.copy(
-                isLoadingOlderMessages = true,
-                snapshot = it.snapshot.copy(hasOlderMessages = false)
-            )
+            it.copy(isLoadingOlderMessages = true)
         }
-        viewModelScope.launch {
-            delay(3_500L)
-            _uiState.update { it.copy(isLoadingOlderMessages = false) }
+        loadOlderJob = viewModelScope.launch {
+            delay(5_000L)
+            _uiState.update {
+                if (it.isLoadingOlderMessages) {
+                    it.copy(isLoadingOlderMessages = false)
+                } else {
+                    it
+                }
+            }
         }
     }
 
@@ -500,5 +639,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun removeQuickPrompt(id: String) = viewModelScope.launch {
         repository.removeQuickPrompt(id)
+    }
+
+    companion object {
+        private val TRAILING_EFFORT_REGEX = Regex(
+            "\\s*(?:\\((Minimal|Low|Medium|High|Extra|Fast)\\)|\\b(Minimal|Low|Medium|High|Extra|Fast))\\s*$",
+            RegexOption.IGNORE_CASE
+        )
     }
 }

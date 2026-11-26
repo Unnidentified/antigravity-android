@@ -117,4 +117,21 @@ class MarkdownAndLatexParserTest {
         assertTrue(aligned is LatexNode.Matrix && aligned.isAligned)
         assertEquals(2, (aligned as LatexNode.Matrix).rows.size)
     }
+
+    @Test
+    fun parsesIndentedCodeBlocksSeparatelyFromBlockquotes() {
+        val md = """
+            > Quote without copy button
+
+                val x = 42
+                println(x)
+        """.trimIndent()
+        val blocks = MarkdownParser.parse(md)
+        assertEquals(2, blocks.size)
+        assertTrue(blocks[0] is MarkdownBlock.BlockQuote)
+        val code = blocks[1] as MarkdownBlock.CodeBlock
+        assertEquals("", code.language)
+        assertTrue(code.code.contains("val x = 42"))
+        assertTrue(code.code.contains("println(x)"))
+    }
 }

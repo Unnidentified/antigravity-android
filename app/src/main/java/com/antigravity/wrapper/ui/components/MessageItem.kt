@@ -1,6 +1,7 @@
 package com.antigravity.wrapper.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -10,70 +11,111 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Difference
-import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.antigravity.wrapper.data.ArtifactCard
+import com.antigravity.wrapper.data.AssistantSegmentKind
 import com.antigravity.wrapper.data.ChatMessage
 import com.antigravity.wrapper.data.MessageRole
 import com.antigravity.wrapper.data.ReasoningBlock
+import com.antigravity.wrapper.data.ReasoningSection
+import com.antigravity.wrapper.data.ReasoningStepItem
+import com.antigravity.wrapper.data.ReasoningStepKind
 import com.antigravity.wrapper.ui.markdown.NativeMarkdownView
+import com.antigravity.wrapper.ui.theme.diffColors
 import kotlinx.coroutines.delay
+
+private val THINKING_STUB_REGEX = Regex("^Thinking(?:\\s+for\\s+\\d+\\s*[sm])?$", RegexOption.IGNORE_CASE)
+private val USER_BUBBLE_SHAPE = RoundedCornerShape(
+    topStart = 22.dp,
+    topEnd = 22.dp,
+    bottomStart = 22.dp,
+    bottomEnd = 6.dp
+)
+private val REASONING_ROW_SHAPE = RoundedCornerShape(8.dp)
+private val STEP_ROW_SHAPE = RoundedCornerShape(6.dp)
+private val BADGE_SHAPE = RoundedCornerShape(4.dp)
+private val ARTIFACT_CARD_SHAPE = RoundedCornerShape(18.dp)
+private val PILL_SHAPE = RoundedCornerShape(999.dp)
+
+private val REASONING_ENTER_TRANSITION = expandVertically(
+    animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
+    expandFrom = Alignment.Top
+) + fadeIn(animationSpec = tween(durationMillis = 120))
+
+private val REASONING_EXIT_TRANSITION = shrinkVertically(
+    animationSpec = tween(durationMillis = 130, easing = FastOutSlowInEasing),
+    shrinkTowards = Alignment.Top
+)
+
+internal fun formatReasoningFileDisplayName(fileName: String, title: String): String {
+    val raw = fileName.ifBlank { title }.trim()
+    if (raw.isEmpty()) return raw
+    val normalized = raw.trimEnd('/', '\\')
+    if (normalized.isEmpty()) return raw
+    val lastSlash = maxOf(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
+    return if (lastSlash >= 0) normalized.substring(lastSlash + 1) else normalized
+}
+
+@Immutable
+data class ExpandedReasoningState(
+    val ids: Map<String, Boolean> = emptyMap()
+)
 
 @Composable
 fun ChatMessageItem(
     message: ChatMessage,
     fontScale: Float,
-    expandedReasoningIds: Map<String, Boolean>,
+    expandedReasoningState: ExpandedReasoningState,
     autoExpandReasoning: Boolean,
     onToggleReasoning: (blockId: String, defaultExpanded: Boolean) -> Unit,
     onExpandReasoningContent: (blockId: String, blockTitle: String) -> Unit = { _, _ -> },
+    onExpandReasoningStep: (blockId: String, sectionId: String, stepId: String, stepTitle: String) -> Unit = { _, _, _, _ -> },
     onCopyText: (String) -> Unit,
     onShareText: (String) -> Unit,
     onLinkClick: (String) -> Unit,
@@ -91,10 +133,11 @@ fun ChatMessageItem(
         AssistantMessageSection(
             message = message,
             fontScale = fontScale,
-            expandedReasoningIds = expandedReasoningIds,
+            expandedReasoningIds = expandedReasoningState.ids,
             autoExpandReasoning = autoExpandReasoning,
             onToggleReasoning = onToggleReasoning,
             onExpandReasoningContent = onExpandReasoningContent,
+            onExpandReasoningStep = onExpandReasoningStep,
             onCopyText = onCopyText,
             onShareText = onShareText,
             onLinkClick = onLinkClick,
@@ -111,6 +154,19 @@ private fun UserMessageBubble(
     onCopyText: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val colorScheme = MaterialTheme.colorScheme
+    val typography = MaterialTheme.typography
+    val textStyle = remember(colorScheme.onSurface, fontScale) {
+        typography.bodyLarge.copy(
+            fontSize = 15.sp * fontScale,
+            lineHeight = 22.sp * fontScale,
+            color = colorScheme.onSurface
+        )
+    }
+    val handleClick = remember(message.markdownContent, onCopyText) {
+        { onCopyText(message.markdownContent) }
+    }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -118,28 +174,54 @@ private fun UserMessageBubble(
         horizontalArrangement = Arrangement.End
     ) {
         Surface(
-            shape = RoundedCornerShape(
-                topStart = 22.dp,
-                topEnd = 22.dp,
-                bottomStart = 22.dp,
-                bottomEnd = 6.dp
-            ),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            modifier = Modifier
-                .widthIn(max = 310.dp)
-                .clickable { onCopyText(message.markdownContent) }
+            onClick = handleClick,
+            shape = USER_BUBBLE_SHAPE,
+            color = colorScheme.surfaceContainerHigh,
+            modifier = Modifier.widthIn(max = 310.dp)
         ) {
             Text(
                 text = message.markdownContent,
-                style = MaterialTheme.typography.bodyLarge.copy(
-                    fontSize = 15.sp * fontScale,
-                    lineHeight = 22.sp * fontScale,
-                    color = MaterialTheme.colorScheme.onSurface
-                ),
+                style = textStyle,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
             )
         }
     }
+}
+
+@Composable
+private fun ReasoningBlockRow(
+    block: ReasoningBlock,
+    fontScale: Float,
+    expandedReasoningIds: Map<String, Boolean>,
+    autoExpandReasoning: Boolean,
+    onToggleReasoning: (blockId: String, defaultExpanded: Boolean) -> Unit,
+    onExpandReasoningContent: (blockId: String, blockTitle: String) -> Unit,
+    onExpandReasoningStep: (blockId: String, sectionId: String, stepId: String, stepTitle: String) -> Unit,
+    onCopyText: (String) -> Unit,
+    onLinkClick: (String) -> Unit
+) {
+    val defaultExpanded = autoExpandReasoning || block.isStreaming
+    val isExpanded = expandedReasoningIds[block.id] ?: defaultExpanded
+    CollapsibleReasoningTree(
+        block = block,
+        headerText = block.title,
+        expanded = isExpanded,
+        expandedIds = expandedReasoningIds,
+        autoExpand = autoExpandReasoning,
+        fontScale = fontScale,
+        onToggleBlock = {
+            onToggleReasoning(block.id, defaultExpanded)
+        },
+        onToggleNode = { nodeId, nodeDefault ->
+            onToggleReasoning(nodeId, nodeDefault)
+        },
+        onRequestBlockContent = { onExpandReasoningContent(block.id, block.title) },
+        onRequestStepExpand = { sectionId, stepId, stepTitle ->
+            onExpandReasoningStep(block.id, sectionId, stepId, stepTitle)
+        },
+        onCopyCode = onCopyText,
+        onLinkClick = onLinkClick
+    )
 }
 
 @Composable
@@ -150,17 +232,29 @@ private fun AssistantMessageSection(
     autoExpandReasoning: Boolean,
     onToggleReasoning: (blockId: String, defaultExpanded: Boolean) -> Unit,
     onExpandReasoningContent: (blockId: String, blockTitle: String) -> Unit,
+    onExpandReasoningStep: (blockId: String, sectionId: String, stepId: String, stepTitle: String) -> Unit,
     onCopyText: (String) -> Unit,
     onShareText: (String) -> Unit,
     onLinkClick: (String) -> Unit,
     onArtifactClick: (ArtifactCard) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var copied by remember { mutableStateOf(false) }
-    LaunchedEffect(copied) {
-        if (copied) {
+    var copied by remember(message.id) { mutableStateOf(false) }
+    if (copied) {
+        LaunchedEffect(message.id) {
             delay(1500L)
             copied = false
+        }
+    }
+
+    val copyableMarkdown = remember(message.markdownContent, message.segments) {
+        if (message.markdownContent.isNotBlank()) {
+            message.markdownContent
+        } else {
+            message.segments
+                .asSequence()
+                .filter { it.kind == AssistantSegmentKind.MARKDOWN && it.markdown.isNotBlank() }
+                .joinToString("\n\n") { it.markdown }
         }
     }
 
@@ -168,88 +262,101 @@ private fun AssistantMessageSection(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // Branded assistant label row
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(24.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                contentAlignment = Alignment.Center
-            ) {
-                AgyLogo(modifier = Modifier.size(16.dp))
+        if (message.isStreaming) {
+            StreamingPulseBadge()
+        }
+
+        if (message.segments.isNotEmpty()) {
+            // Interleaved chronological segments (reasoning blocks <-> markdown prose)
+            for (i in message.segments.indices) {
+                val segment = message.segments[i]
+                when (segment.kind) {
+                    AssistantSegmentKind.REASONING -> {
+                        val block = segment.reasoningBlock
+                        if (block != null) {
+                            key(segment.id) {
+                                ReasoningBlockRow(
+                                    block = block,
+                                    fontScale = fontScale,
+                                    expandedReasoningIds = expandedReasoningIds,
+                                    autoExpandReasoning = autoExpandReasoning,
+                                    onToggleReasoning = onToggleReasoning,
+                                    onExpandReasoningContent = onExpandReasoningContent,
+                                    onExpandReasoningStep = onExpandReasoningStep,
+                                    onCopyText = onCopyText,
+                                    onLinkClick = onLinkClick
+                                )
+                            }
+                        }
+                    }
+                    AssistantSegmentKind.MARKDOWN -> {
+                        if (segment.markdown.isNotBlank()) {
+                            key(segment.id) {
+                                NativeMarkdownView(
+                                    markdown = segment.markdown,
+                                    fontScale = fontScale,
+                                    onCopyCode = onCopyText,
+                                    onLinkClick = onLinkClick
+                                )
+                            }
+                        }
+                    }
+                }
             }
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "Antigravity",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            if (message.timestampLabel.isNotBlank()) {
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = "• ${message.timestampLabel}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+        } else {
+            // Fallback for messages without interleaved segments
+            for (i in message.reasoningBlocks.indices) {
+                val block = message.reasoningBlocks[i]
+                key(block.id) {
+                    ReasoningBlockRow(
+                        block = block,
+                        fontScale = fontScale,
+                        expandedReasoningIds = expandedReasoningIds,
+                        autoExpandReasoning = autoExpandReasoning,
+                        onToggleReasoning = onToggleReasoning,
+                        onExpandReasoningContent = onExpandReasoningContent,
+                        onExpandReasoningStep = onExpandReasoningStep,
+                        onCopyText = onCopyText,
+                        onLinkClick = onLinkClick
+                    )
+                }
+            }
+
+            if (message.markdownContent.isNotBlank()) {
+                NativeMarkdownView(
+                    markdown = message.markdownContent,
+                    fontScale = fontScale,
+                    onCopyCode = onCopyText,
+                    onLinkClick = onLinkClick
                 )
             }
-            if (message.isStreaming) {
-                Spacer(modifier = Modifier.width(8.dp))
-                StreamingPulseBadge()
-            }
-        }
-
-        // Collapsible & Expandable Reasoning / Thought Blocks
-        message.reasoningBlocks.forEach { block ->
-            val defaultExpanded = autoExpandReasoning || block.isStreaming
-            val isExpanded = expandedReasoningIds[block.id] ?: defaultExpanded
-            CollapsibleReasoningCard(
-                block = block,
-                expanded = isExpanded,
-                fontScale = fontScale,
-                onToggle = {
-                    if (!isExpanded && block.content.isBlank()) {
-                        onExpandReasoningContent(block.id, block.title)
-                    }
-                    onToggleReasoning(block.id, defaultExpanded)
-                },
-                onRequestContent = { onExpandReasoningContent(block.id, block.title) },
-                onCopyCode = onCopyText,
-                onLinkClick = onLinkClick
-            )
-        }
-
-        // Native Markdown + LaTeX + Code Response Body
-        if (message.markdownContent.isNotBlank()) {
-            NativeMarkdownView(
-                markdown = message.markdownContent,
-                fontScale = fontScale,
-                onCopyCode = onCopyText,
-                onLinkClick = onLinkClick
-            )
         }
 
         // Artifact / Diff Summary Cards
-        message.artifacts.forEach { artifact ->
-            ArtifactSummaryCard(
-                artifact = artifact,
-                onOpen = { onArtifactClick(artifact) }
-            )
+        for (i in message.artifacts.indices) {
+            val artifact = message.artifacts[i]
+            key(artifact.id) {
+                ArtifactSummaryCard(
+                    artifact = artifact,
+                    onOpen = { onArtifactClick(artifact) }
+                )
+            }
         }
 
         // Native Message Action Row
-        val isThinkingStub = message.markdownContent.trim()
-            .matches(Regex("^Thinking(?:\\s+for\\s+\\d+\\s*[sm])?$", RegexOption.IGNORE_CASE))
-        if (!message.isStreaming && message.markdownContent.isNotBlank() && !isThinkingStub) {
+        val isThinkingStub = remember(copyableMarkdown) {
+            copyableMarkdown.trim().matches(THINKING_STUB_REGEX)
+        }
+        if (!message.isStreaming && copyableMarkdown.isNotBlank() && !isThinkingStub) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 IconButton(
                     onClick = {
-                        onCopyText(message.markdownContent)
+                        onCopyText(copyableMarkdown)
                         copied = true
                     },
                     modifier = Modifier.size(34.dp)
@@ -262,7 +369,7 @@ private fun AssistantMessageSection(
                     )
                 }
                 IconButton(
-                    onClick = { onShareText(message.markdownContent) },
+                    onClick = { onShareText(copyableMarkdown) },
                     modifier = Modifier.size(34.dp)
                 ) {
                     Icon(
@@ -278,139 +385,490 @@ private fun AssistantMessageSection(
 }
 
 @Composable
-fun CollapsibleReasoningCard(
+fun CollapsibleReasoningTree(
     block: ReasoningBlock,
+    headerText: String,
     expanded: Boolean,
+    expandedIds: Map<String, Boolean>,
+    autoExpand: Boolean,
     fontScale: Float,
-    onToggle: () -> Unit,
-    onRequestContent: () -> Unit = {},
+    onToggleBlock: () -> Unit,
+    onToggleNode: (nodeId: String, defaultExpanded: Boolean) -> Unit,
+    onRequestBlockContent: () -> Unit = {},
+    onRequestStepExpand: (sectionId: String, stepId: String, stepTitle: String) -> Unit = { _, _, _ -> },
     onCopyCode: (String) -> Unit,
     onLinkClick: (String) -> Unit
 ) {
-    val chevronRotation by animateFloatAsState(
-        targetValue = if (expanded) 180f else 0f,
-        animationSpec = tween(durationMillis = 220),
-        label = "ReasoningChevron"
+    val chevronRotationState = animateFloatAsState(
+        targetValue = if (expanded) 90f else 0f,
+        animationSpec = tween(durationMillis = 150),
+        label = "ReasoningTreeChevron"
     )
+    val hasStructuredPayload = block.sections.isNotEmpty() || block.content.isNotBlank()
     var awaitingContent by remember(block.id) { mutableStateOf(false) }
     var requestedRemote by remember(block.id) { mutableStateOf(false) }
 
-    LaunchedEffect(expanded, block.content) {
-        if (expanded && block.content.isBlank()) {
+    if (expanded && !hasStructuredPayload) {
+        LaunchedEffect(block.id, hasStructuredPayload) {
             awaitingContent = true
             if (!requestedRemote) {
                 requestedRemote = true
-                onRequestContent()
+                onRequestBlockContent()
             }
             delay(1800L)
             awaitingContent = false
-        } else {
-            awaitingContent = false
         }
+    } else {
+        if (awaitingContent) awaitingContent = false
+        if (!expanded && requestedRemote) requestedRemote = false
     }
 
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
-                shape = RoundedCornerShape(16.dp)
+    val colorScheme = MaterialTheme.colorScheme
+    val guideColor = colorScheme.outlineVariant.copy(alpha = 0.45f)
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Level 1: Borderless muted text toggle + chevron (› collapsed, ⌄ expanded)
+        Row(
+            modifier = Modifier
+                .clip(REASONING_ROW_SHAPE)
+                .clickable(onClick = onToggleBlock)
+                .padding(vertical = 4.dp, horizontal = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = headerText,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 14.sp * fontScale
+                ),
+                color = if (expanded) {
+                    colorScheme.onSurface
+                } else {
+                    colorScheme.onSurfaceVariant
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
             )
-    ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Row(
+            Spacer(modifier = Modifier.width(4.dp))
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = if (expanded) "Collapse work summary" else "Expand work summary",
+                tint = colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(16.dp)
+                    .graphicsLayer { rotationZ = chevronRotationState.value }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = expanded,
+            enter = REASONING_ENTER_TRANSITION,
+            exit = REASONING_EXIT_TRANSITION
+        ) {
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onToggle)
-                    .padding(horizontal = 14.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .drawBehind {
+                        val x = 6.dp.toPx()
+                        val topY = 2.dp.toPx()
+                        val bottomY = (size.height - 4.dp.toPx()).coerceAtLeast(topY)
+                        drawLine(
+                            color = guideColor,
+                            start = Offset(x, topY),
+                            end = Offset(x, bottomY),
+                            strokeWidth = 1.dp.toPx()
+                        )
+                    }
+                    .padding(start = 16.dp, top = 2.dp, bottom = 4.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.Psychology,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = block.title,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                if (block.durationLabel.isNotBlank()) {
+                when {
+                    block.sections.isNotEmpty() -> {
+                        for (index in block.sections.indices) {
+                            val section = block.sections[index]
+                            key(section.id) {
+                                ReasoningSectionNode(
+                                    section = section,
+                                    expandedIds = expandedIds,
+                                    autoExpand = autoExpand,
+                                    fontScale = fontScale,
+                                    onToggleNode = onToggleNode,
+                                    onRequestStepExpand = onRequestStepExpand,
+                                    onCopyCode = onCopyCode,
+                                    onLinkClick = onLinkClick,
+                                    modifier = if (index > 0) Modifier.padding(top = 2.dp) else Modifier
+                                )
+                            }
+                        }
+                    }
+                    block.content.isNotBlank() -> {
+                        NativeMarkdownView(
+                            markdown = block.content,
+                            fontScale = fontScale * 0.90f,
+                            onCopyCode = onCopyCode,
+                            onLinkClick = onLinkClick,
+                            enableSelection = false
+                        )
+                    }
+                    awaitingContent -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                strokeWidth = 1.75.dp,
+                                color = colorScheme.primary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                text = "Loading steps…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    else -> {
+                        Text(
+                            text = if (block.durationLabel.isNotBlank()) {
+                                "Worked for ${block.durationLabel}."
+                            } else {
+                                "No step trace available for this section."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReasoningSectionNode(
+    section: ReasoningSection,
+    expandedIds: Map<String, Boolean>,
+    autoExpand: Boolean,
+    fontScale: Float,
+    onToggleNode: (nodeId: String, defaultExpanded: Boolean) -> Unit,
+    onRequestStepExpand: (sectionId: String, stepId: String, stepTitle: String) -> Unit,
+    onCopyCode: (String) -> Unit,
+    onLinkClick: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (section.title.isBlank()) {
+        Column(modifier = modifier.fillMaxWidth()) {
+            for (index in section.steps.indices) {
+                val step = section.steps[index]
+                key(step.id) {
+                    ReasoningStepNode(
+                        sectionId = section.id,
+                        step = step,
+                        expandedIds = expandedIds,
+                        fontScale = fontScale,
+                        onToggleNode = onToggleNode,
+                        onRequestStepExpand = onRequestStepExpand,
+                        onCopyCode = onCopyCode,
+                        onLinkClick = onLinkClick,
+                        modifier = if (index > 0) Modifier.padding(top = 2.dp) else Modifier
+                    )
+                }
+            }
+        }
+        return
+    }
+
+    val defaultOpen = autoExpand || section.defaultExpanded
+    val secExpanded = expandedIds[section.id] ?: defaultOpen
+    val secChevronState = animateFloatAsState(
+        targetValue = if (secExpanded) 90f else 0f,
+        animationSpec = tween(durationMillis = 150),
+        label = "SectionChevron"
+    )
+    var awaitingSteps by remember(section.id) { mutableStateOf(false) }
+    var requestedSteps by remember(section.id) { mutableStateOf(false) }
+
+    if (secExpanded && section.steps.isEmpty()) {
+        LaunchedEffect(section.id) {
+            awaitingSteps = true
+            if (!requestedSteps) {
+                requestedSteps = true
+                onRequestStepExpand(section.id, "", "")
+            }
+            delay(1500L)
+            awaitingSteps = false
+        }
+    } else {
+        if (awaitingSteps) awaitingSteps = false
+        if (!secExpanded && requestedSteps) requestedSteps = false
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        // Level 2: Borderless progress group header row
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(REASONING_ROW_SHAPE)
+                .clickable {
+                    if (!secExpanded && section.steps.isEmpty()) {
+                        requestedSteps = true
+                        onRequestStepExpand(section.id, "", "")
+                    }
+                    onToggleNode(section.id, defaultOpen)
+                }
+                .padding(vertical = 4.dp, horizontal = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = section.title,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = 13.5.sp * fontScale
+                ),
+                color = if (secExpanded) {
+                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f)
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = if (secExpanded) "Collapse section" else "Expand section",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(15.dp)
+                    .graphicsLayer { rotationZ = secChevronState.value }
+            )
+        }
+
+        AnimatedVisibility(
+            visible = secExpanded,
+            enter = REASONING_ENTER_TRANSITION,
+            exit = REASONING_EXIT_TRANSITION
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, top = 2.dp, bottom = 2.dp)
+            ) {
+                if (section.steps.isEmpty()) {
+                    Text(
+                        text = if (awaitingSteps) "Loading steps…" else "No nested steps logged.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 2.dp)
+                    )
+                } else {
+                    for (index in section.steps.indices) {
+                        val step = section.steps[index]
+                        key(step.id) {
+                            ReasoningStepNode(
+                                sectionId = section.id,
+                                step = step,
+                                expandedIds = expandedIds,
+                                fontScale = fontScale,
+                                onToggleNode = onToggleNode,
+                                onRequestStepExpand = onRequestStepExpand,
+                                onCopyCode = onCopyCode,
+                                onLinkClick = onLinkClick,
+                                modifier = if (index > 0) Modifier.padding(top = 2.dp) else Modifier
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReasoningStepNode(
+    sectionId: String,
+    step: ReasoningStepItem,
+    expandedIds: Map<String, Boolean>,
+    fontScale: Float,
+    onToggleNode: (nodeId: String, defaultExpanded: Boolean) -> Unit,
+    onRequestStepExpand: (sectionId: String, stepId: String, stepTitle: String) -> Unit,
+    onCopyCode: (String) -> Unit,
+    onLinkClick: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val canExpand = step.isExpandable || step.detail.isNotBlank()
+    val stepExpanded = expandedIds[step.id] ?: false
+    val stepChevronState = animateFloatAsState(
+        targetValue = if (stepExpanded) 90f else 0f,
+        animationSpec = tween(durationMillis = 140),
+        label = "StepChevron"
+    )
+    var awaitingStepDetail by remember(step.id) { mutableStateOf(false) }
+
+    if (stepExpanded && step.detail.isBlank() && step.isExpandable) {
+        LaunchedEffect(step.id) {
+            awaitingStepDetail = true
+            delay(1500L)
+            awaitingStepDetail = false
+        }
+    } else if (awaitingStepDetail) {
+        awaitingStepDetail = false
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        val rowModifier = Modifier
+            .fillMaxWidth()
+            .clip(STEP_ROW_SHAPE)
+            .let { mod ->
+                if (canExpand) {
+                    mod.clickable {
+                        if (!stepExpanded && step.detail.isBlank()) {
+                            onRequestStepExpand(sectionId, step.id, step.title)
+                        }
+                        onToggleNode(step.id, false)
+                    }
+                } else {
+                    mod
+                }
+            }
+            .padding(vertical = 4.dp, horizontal = 2.dp)
+
+        Row(
+            modifier = rowModifier,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (step.kind == ReasoningStepKind.FILE) {
+                if (step.actionVerb.isNotBlank()) {
+                    Text(
+                        text = step.actionVerb,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontSize = 13.sp * fontScale
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                if (step.badgeText.isNotBlank()) {
                     Surface(
-                        shape = RoundedCornerShape(999.dp),
+                        shape = BADGE_SHAPE,
                         color = MaterialTheme.colorScheme.surfaceContainerHigh
                     ) {
                         Text(
-                            text = block.durationLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            text = step.badgeText,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 9.5.sp * fontScale,
+                                fontWeight = FontWeight.SemiBold
+                            ),
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                         )
                     }
                     Spacer(modifier = Modifier.width(6.dp))
                 }
-                Icon(
-                    imageVector = Icons.Rounded.ExpandMore,
-                    contentDescription = if (expanded) "Collapse reasoning" else "Expand reasoning",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .size(20.dp)
-                        .rotate(chevronRotation)
+                Text(
+                    text = formatReasoningFileDisplayName(step.fileName, step.title),
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 13.sp * fontScale
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (step.lineRange.isNotBlank()) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = step.lineRange,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.5.sp * fontScale
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
+                }
+            } else {
+                Text(
+                    text = step.title,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontSize = 13.sp * fontScale
+                    ),
+                    color = if (stepExpanded) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
             }
 
+            if (canExpand) {
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                    contentDescription = if (stepExpanded) "Collapse step" else "Expand step",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .size(14.dp)
+                        .graphicsLayer { rotationZ = stepChevronState.value }
+                )
+            }
+        }
+
+        if (canExpand) {
             AnimatedVisibility(
-                visible = expanded,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
+                visible = stepExpanded,
+                enter = REASONING_ENTER_TRANSITION,
+                exit = REASONING_EXIT_TRANSITION
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.55f))
-                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .padding(start = 10.dp, top = 2.dp, bottom = 6.dp)
+                        .clip(REASONING_ROW_SHAPE)
+                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                        .padding(10.dp)
                 ) {
-                    if (block.content.isNotBlank()) {
-                        NativeMarkdownView(
-                            markdown = block.content,
-                            fontScale = fontScale * 0.92f,
-                            onCopyCode = onCopyCode,
-                            onLinkClick = onLinkClick
-                        )
-                    } else if (awaitingContent) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            CircularProgressIndicator(
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(14.dp)
+                    when {
+                        step.detail.isNotBlank() -> {
+                            NativeMarkdownView(
+                                markdown = step.detail,
+                                fontScale = fontScale * 0.88f,
+                                onCopyCode = onCopyCode,
+                                onLinkClick = onLinkClick,
+                                enableSelection = false
                             )
+                        }
+                        awaitingStepDetail -> {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    strokeWidth = 1.75.dp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Text(
+                                    text = "Fetching details…",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        else -> {
                             Text(
-                                text = "Loading reasoning steps…",
-                                style = MaterialTheme.typography.bodySmall,
+                                text = "No additional step output.",
+                                style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                    } else {
-                        Text(
-                            text = if (block.durationLabel.isNotBlank()) {
-                                "Agent worked for ${block.durationLabel}; detailed step trace is not expanded on the desktop session."
-                            } else {
-                                "No detailed thought steps logged for this section."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                 }
             }
@@ -423,17 +881,20 @@ private fun ArtifactSummaryCard(
     artifact: ArtifactCard,
     onOpen: () -> Unit
 ) {
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val diffPalette = remember(isDark) { diffColors(isDark) }
+
     Surface(
-        shape = RoundedCornerShape(18.dp),
+        shape = ARTIFACT_CARD_SHAPE,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(ARTIFACT_CARD_SHAPE)
             .clickable(onClick = onOpen)
             .border(
                 width = 1.dp,
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f),
-                shape = RoundedCornerShape(18.dp)
+                shape = ARTIFACT_CARD_SHAPE
             )
     ) {
         Row(
@@ -467,7 +928,7 @@ private fun ArtifactSummaryCard(
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.SemiBold
                             ),
-                            color = Color(0xFF4ADE80)
+                            color = diffPalette.addedAccent
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
@@ -476,7 +937,7 @@ private fun ArtifactSummaryCard(
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.SemiBold
                             ),
-                            color = Color(0xFFF87171)
+                            color = diffPalette.removedAccent
                         )
                     }
                 }
@@ -497,7 +958,7 @@ private fun ArtifactSummaryCard(
                 else -> "Open"
             }
             Surface(
-                shape = RoundedCornerShape(999.dp),
+                shape = PILL_SHAPE,
                 color = MaterialTheme.colorScheme.secondaryContainer
             ) {
                 Row(
@@ -527,8 +988,8 @@ private fun ArtifactSummaryCard(
 @Composable
 private fun StreamingPulseBadge() {
     val transition = rememberInfiniteTransition(label = "StreamingPulse")
-    val alpha by transition.animateFloat(
-        initialValue = 0.35f,
+    val alphaState = transition.animateFloat(
+        initialValue = 0.45f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(700, easing = LinearEasing),
@@ -537,8 +998,9 @@ private fun StreamingPulseBadge() {
         label = "StreamingAlpha"
     )
     Surface(
-        shape = RoundedCornerShape(999.dp),
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = alpha)
+        shape = PILL_SHAPE,
+        color = MaterialTheme.colorScheme.primaryContainer,
+        modifier = Modifier.graphicsLayer { alpha = alphaState.value }
     ) {
         Text(
             text = "Generating…",

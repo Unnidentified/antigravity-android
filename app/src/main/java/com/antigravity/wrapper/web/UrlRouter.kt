@@ -38,13 +38,21 @@ object UrlRouter {
     // Regional Google auth domains such as accounts.google.co.uk or accounts.google.de
     private val REGIONAL_GOOGLE_ACCOUNTS_REGEX = Regex("^accounts\\.google\\.[a-z]{2,3}(?:\\.[a-z]{2})?$")
 
+    fun isBlankOrEmpty(urlString: String?): Boolean {
+        if (urlString.isNullOrBlank()) return true
+        val trimmed = urlString.trim()
+        return trimmed.equals("about:blank", ignoreCase = true) ||
+            trimmed.startsWith("about:blank#", ignoreCase = true) ||
+            trimmed.startsWith("about:blank?", ignoreCase = true)
+    }
+
     fun route(urlString: String?): Route {
         if (urlString.isNullOrBlank()) {
             return Route.IN_APP
         }
 
         val trimmed = urlString.trim()
-        if (trimmed.equals("about:blank", ignoreCase = true)) {
+        if (isBlankOrEmpty(trimmed)) {
             return Route.IN_APP
         }
 

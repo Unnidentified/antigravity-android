@@ -2,16 +2,42 @@ package com.antigravity.wrapper.data
 
 import androidx.compose.runtime.Immutable
 
-enum class ThemeMode(val storageKey: String, val label: String) {
-    SYSTEM("system", "System"),
-    DARK("dark", "Dark"),
-    SLATE("slate", "Slate"),
-    AMOLED("amoled", "AMOLED"),
-    LIGHT("light", "Light");
+enum class ThemeMode(
+    val storageKey: String,
+    val label: String,
+    val isDark: Boolean,
+    val swatchArgb: Long
+) {
+    ANTIGRAVITY_DARK("antigravity_dark", "Antigravity Dark", true, 0xFFA8C7FAL),
+    PURE_OLED_BLACK("pure_oled_black", "Pure OLED Black", true, 0xFFE2E8F0L),
+    ANTIGRAVITY_LIGHT("antigravity_light", "Antigravity Light", false, 0xFF1A56DBL),
+    CATPPUCCIN_MOCHA("catppuccin_mocha", "Catppuccin Mocha", true, 0xFFCBA6F7L),
+    CATPPUCCIN_LATTE("catppuccin_latte", "Catppuccin Latte", false, 0xFF8839EFL),
+    DRACULA("dracula", "Dracula", true, 0xFFBD93F9L),
+    NORD("nord", "Nord", true, 0xFF88C0D0L),
+    TOKYO_NIGHT("tokyo_night", "Tokyo Night", true, 0xFF7AA2F7L),
+    GRUVBOX_DARK("gruvbox_dark", "Gruvbox Dark", true, 0xFFFABD2FL),
+    GRUVBOX_LIGHT("gruvbox_light", "Gruvbox Light", false, 0xFFD79921L),
+    ONE_DARK_PRO("one_dark_pro", "One Dark Pro", true, 0xFF61AFEFL),
+    SOLARIZED_DARK("solarized_dark", "Solarized Dark", true, 0xFF268BD2L),
+    SOLARIZED_LIGHT("solarized_light", "Solarized Light", false, 0xFF2AA198L),
+    MONOKAI_PRO("monokai_pro", "Monokai Pro", true, 0xFFFFD866L),
+    ROSE_PINE("rose_pine", "Rosé Pine", true, 0xFFEBBCBAL),
+    ROSE_PINE_DAWN("rose_pine_dawn", "Rosé Pine Dawn", false, 0xFFD7827EL),
+    KANAGAWA_WAVE("kanagawa_wave", "Kanagawa Wave", true, 0xFF7E9CD8L),
+    EVERFOREST_DARK("everforest_dark", "Everforest Dark", true, 0xFFA7C080L),
+    AYU_MIRAGE("ayu_mirage", "Ayu Mirage", true, 0xFFFFCC66L),
+    GITHUB_DARK_DEFAULT("github_dark_default", "GitHub Dark Default", true, 0xFF58A6FFL),
+    SLATE("slate", "Slate", true, 0xFFE2C290L),
+    SYSTEM("system", "System", true, 0xFF8AB4F8L);
 
     companion object {
-        fun fromKey(key: String?): ThemeMode =
-            entries.firstOrNull { it.storageKey == key } ?: SLATE
+        fun fromKey(key: String?): ThemeMode = when (key) {
+            "dark" -> ANTIGRAVITY_DARK
+            "amoled" -> PURE_OLED_BLACK
+            "light" -> ANTIGRAVITY_LIGHT
+            else -> entries.firstOrNull { it.storageKey == key } ?: ANTIGRAVITY_DARK
+        }
     }
 }
 
@@ -29,8 +55,8 @@ enum class MessageRole {
 }
 
 data class AppSettings(
-    val themeMode: ThemeMode = ThemeMode.SLATE,
-    val dynamicColor: Boolean = true,
+    val themeMode: ThemeMode = ThemeMode.ANTIGRAVITY_DARK,
+    val dynamicColor: Boolean = false,
     val fontScalePercent: Int = 100,
     val hapticFeedbackEnabled: Boolean = true,
     val autoExpandReasoning: Boolean = false,
@@ -49,12 +75,41 @@ data class ChatConversation(
     val isActive: Boolean = false
 )
 
+enum class ReasoningStepKind {
+    COMMAND,
+    FILE,
+    SECTION,
+    NOTE
+}
+
+@Immutable
+data class ReasoningStepItem(
+    val id: String,
+    val title: String,
+    val kind: ReasoningStepKind = ReasoningStepKind.NOTE,
+    val detail: String = "",
+    val fileName: String = "",
+    val lineRange: String = "",
+    val badgeText: String = "",
+    val actionVerb: String = "",
+    val isExpandable: Boolean = false
+)
+
+@Immutable
+data class ReasoningSection(
+    val id: String,
+    val title: String,
+    val steps: List<ReasoningStepItem> = emptyList(),
+    val defaultExpanded: Boolean = false
+)
+
 @Immutable
 data class ReasoningBlock(
     val id: String,
     val title: String,
     val durationLabel: String = "",
-    val content: String,
+    val content: String = "",
+    val sections: List<ReasoningSection> = emptyList(),
     val isStreaming: Boolean = false
 )
 
@@ -69,6 +124,19 @@ data class ArtifactCard(
     val removedLines: Int? = null
 )
 
+enum class AssistantSegmentKind {
+    REASONING,
+    MARKDOWN
+}
+
+@Immutable
+data class AssistantSegment(
+    val id: String,
+    val kind: AssistantSegmentKind,
+    val markdown: String = "",
+    val reasoningBlock: ReasoningBlock? = null
+)
+
 @Immutable
 data class ChatMessage(
     val id: String,
@@ -78,7 +146,9 @@ data class ChatMessage(
     val reasoningBlocks: List<ReasoningBlock> = emptyList(),
     val artifacts: List<ArtifactCard> = emptyList(),
     val isStreaming: Boolean = false,
-    val isOptimistic: Boolean = false
+    val isOptimistic: Boolean = false,
+    val optimisticBaselineCount: Int = 0,
+    val segments: List<AssistantSegment> = emptyList()
 )
 
 @Immutable

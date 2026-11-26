@@ -129,10 +129,82 @@ class BridgeStateParserTest {
     }
 
     @Test
-    fun slateIsDefaultThemeOnFirstInstall() {
-        assertEquals(ThemeMode.SLATE, ThemeMode.fromKey(null))
-        assertEquals(ThemeMode.SLATE, ThemeMode.fromKey("unknown_key"))
-        assertEquals(ThemeMode.SLATE, AppSettings().themeMode)
+    fun antigravityDarkIsDefaultAndAllThemesResolveCleanly() {
+        assertEquals(ThemeMode.ANTIGRAVITY_DARK, ThemeMode.fromKey(null))
+        assertEquals(ThemeMode.ANTIGRAVITY_DARK, ThemeMode.fromKey("unknown_key"))
+        assertEquals(ThemeMode.ANTIGRAVITY_DARK, ThemeMode.fromKey("dark"))
+        assertEquals(ThemeMode.PURE_OLED_BLACK, ThemeMode.fromKey("amoled"))
+        assertEquals(ThemeMode.ANTIGRAVITY_LIGHT, ThemeMode.fromKey("light"))
+        assertEquals(ThemeMode.SLATE, ThemeMode.fromKey("slate"))
+        assertEquals(ThemeMode.SYSTEM, ThemeMode.fromKey("system"))
+        assertEquals(ThemeMode.ANTIGRAVITY_DARK, AppSettings().themeMode)
+        assertTrue(ThemeMode.entries.size >= 20)
+        ThemeMode.entries.forEach { mode ->
+            assertEquals(mode, ThemeMode.fromKey(mode.storageKey))
+        }
+    }
+
+    @Test
+    fun parsesThreeLevelReasoningSectionsAndStepItems() {
+        val json = """
+            {
+              "url": "https://antigravity.google.com/remote/r1",
+              "title": "Reasoning Test",
+              "messages": [
+                {
+                  "id": "m1",
+                  "role": "assistant",
+                  "markdown": "Done.",
+                  "reasoning": [
+                    {
+                      "id": "r1",
+                      "title": "Worked for 45s",
+                      "duration": "45s",
+                      "content": "",
+                      "sections": [
+                        {
+                          "id": "sec1",
+                          "title": "Explored files, ran commands, edited files",
+                          "defaultExpanded": true,
+                          "steps": [
+                            {
+                              "id": "st1",
+                              "title": "List commits, tags, and releases",
+                              "kind": "command",
+                              "detail": "```bash\ngit tag\n```",
+                              "isExpandable": true
+                            },
+                            {
+                              "id": "st2",
+                              "title": "README.md",
+                              "kind": "file",
+                              "fileName": "README.md",
+                              "lineRange": "#L1-19",
+                              "badgeText": "MD",
+                              "actionVerb": "Analyzed",
+                              "isExpandable": false
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+        """.trimIndent()
+        val snap = BridgeStateParser.parseSnapshot(json)!!
+        assertEquals(1, snap.messages.size)
+        val block = snap.messages[0].reasoningBlocks[0]
+        assertEquals("Worked for 45s", block.title)
+        assertEquals(1, block.sections.size)
+        assertEquals("Explored files, ran commands, edited files", block.sections[0].title)
+        assertEquals(2, block.sections[0].steps.size)
+        assertEquals(ReasoningStepKind.COMMAND, block.sections[0].steps[0].kind)
+        assertEquals(ReasoningStepKind.FILE, block.sections[0].steps[1].kind)
+        assertEquals("README.md", block.sections[0].steps[1].fileName)
+        assertEquals("#L1-19", block.sections[0].steps[1].lineRange)
+        assertEquals("MD", block.sections[0].steps[1].badgeText)
     }
 
     @Test

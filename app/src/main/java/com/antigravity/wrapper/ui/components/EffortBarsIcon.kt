@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
 fun effortLevelCount(effort: String): Int = when (effort.trim().lowercase()) {
+    "minimal" -> 1
     "low", "fast" -> 1
     "medium" -> 2
     "high" -> 3

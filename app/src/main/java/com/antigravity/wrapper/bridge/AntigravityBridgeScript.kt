@@ -17,7 +17,7 @@ object AntigravityBridgeScript {
             window.location.replace('https://antigravity.google.com/remote');
             return;
           }
-          const BRIDGE_VERSION = 19;
+          const BRIDGE_VERSION = 24;
           if (window.__agBridge && window.__agBridge.version === BRIDGE_VERSION) {
             window.__agBridge.syncNow();
             return;
@@ -43,8 +43,14 @@ object AntigravityBridgeScript {
               isLive: false
             },
             lastQuotaDiag: '',
-            modelMutationHoldUntil: 0
+            modelMutationHoldUntil: 0,
+            domNodeIds: new WeakMap(),
+            turnExtractCache: new WeakMap(),
+            streamIdSeq: 0
           });
+          if (!store.domNodeIds) store.domNodeIds = new WeakMap();
+          if (!store.turnExtractCache) store.turnExtractCache = new WeakMap();
+          if (typeof store.streamIdSeq !== 'number') store.streamIdSeq = 0;
           let cachedModels = store.models;
           let cachedEffortMap = store.effortMap;
           let cachedProjects = store.projects;
@@ -54,7 +60,12 @@ object AntigravityBridgeScript {
           let streamingHeartbeatTimer = null;
           let streamingHeartbeatTicks = 0;
           let lastQuotaDiag = store.lastQuotaDiag || '';
-          let lastPayloadHash = '';
+          let lastPayloadSig = '';
+          let lastDomSig = '';
+          let isPaused = false;
+          let isScrolling = false;
+          let scrollResumeTimer = null;
+          let pendingSyncAfterThrottle = false;
           let isInternalModalProbe = false;
           let modelsPrewarmed = store.models.length > 0;
           let quotaPrewarmed = !!store.quota.isLive;
@@ -222,21 +233,110 @@ object AntigravityBridgeScript {
             return cleanText(el.textContent);
           }
 
+          function isReasoningCollapsibleTrigger(el) {
+            if (!el || el.nodeType !== 1) return false;
+            const tid = (el.getAttribute('data-testid') || '').toLowerCase();
+            return tid === 'worked-for-collapsible' ||
+              tid === 'tool-group-collapsible' ||
+              tid === 'subagent-group-collapsible';
+          }
+
+          function isNonCollapsibleBodyNode(el) {
+            if (!el || el.nodeType !== 1) return true;
+            const tid = (el.getAttribute('data-testid') || '').toLowerCase();
+            if (tid === 'worked-for-collapsible' ||
+                tid === 'tool-group-collapsible' ||
+                tid === 'subagent-group-collapsible' ||
+                tid === 'artifact-card' ||
+                tid === 'changed-files-card' ||
+                tid === 'turn-cards-container' ||
+                tid === 'user-message' ||
+                tid === 'agent-response' ||
+                tid === 'cascade-system-message-toolbar') {
+              return true;
+            }
+            const tag = (el.tagName || '').toLowerCase();
+            if (tag === 'fieldset' && /response actions/i.test(el.getAttribute('aria-label') || '')) return true;
+            if (tag === 'p' || tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4' ||
+                tag === 'ul' || tag === 'ol' || tag === 'blockquote' || tag === 'table') {
+              return true;
+            }
+            if (el.hasAttribute('data-markdown-root')) return true;
+            if (el.querySelector &&
+                el.querySelector('[data-markdown-root]') &&
+                !el.querySelector('[data-step-rows="true"], [data-testid="tool-group-collapsible"], [data-testid="subagent-group-collapsible"], [data-testid="run-command-step"], [data-testid="view-file-step"], [data-testid="edit-file-step"]')) {
+              return true;
+            }
+            return false;
+          }
+
+          function getCollapsibleBody(el) {
+            if (!el || el.nodeType !== 1) return null;
+            const tag = (el.tagName || '').toLowerCase();
+            if (tag === 'details') {
+              return el.open === true ? el : null;
+            }
+            if (el.getAttribute('aria-expanded') !== 'true') {
+              return null;
+            }
+            const parent = el.parentElement;
+            const sib = el.nextElementSibling;
+            if (sib && !isNonCollapsibleBodyNode(sib)) {
+              if (parent && parent.classList && parent.classList.contains('relative') &&
+                  parent.children.length <= 3 &&
+                  parent.getAttribute('data-testid') !== 'agent-response') {
+                const last = parent.children[parent.children.length - 1];
+                if (last && last !== el && !isNonCollapsibleBodyNode(last)) {
+                  return last;
+                }
+              }
+              return sib;
+            }
+            if (!sib && parent && parent.parentElement &&
+                parent.parentElement.classList &&
+                parent.parentElement.classList.contains('relative') &&
+                parent.parentElement.children.length <= 3 &&
+                parent.parentElement.getAttribute('data-testid') !== 'agent-response') {
+              const parentSib = parent.nextElementSibling;
+              if (parentSib && !isNonCollapsibleBodyNode(parentSib)) {
+                return parentSib;
+              }
+            }
+            return null;
+          }
+
           function isReasoningElement(el) {
             if (!el || el.nodeType !== 1) return false;
             const tid = (el.getAttribute('data-testid') || '').toLowerCase();
-            if (tid === 'worked-for-collapsible' || tid.includes('thought') || tid.includes('reason')) return true;
+            if (isReasoningCollapsibleTrigger(el) || tid.includes('thought') || tid.includes('reason')) {
+              return true;
+            }
             const tag = (el.tagName || '').toLowerCase();
             if (tag === 'details') return true;
             const cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
-            return cls.includes('thought') || cls.includes('thinking') || cls.includes('reasoning');
+            if (/(?:^|\s)(?:thought|thinking|reasoning)(?:[-_a-z0-9]*)?(?:\s|$)/.test(cls)) {
+              if (el.querySelector && el.querySelector('[data-markdown-root]')) {
+                return false;
+              }
+              return true;
+            }
+            return false;
           }
 
           function isExcludedFromMarkdown(el) {
             if (!el || el.nodeType !== 1) return false;
             if (isScreenReaderOnly(el)) return true;
+            if (el.hasAttribute('data-ag-reason-body')) return true;
             const tid = (el.getAttribute('data-testid') || '').toLowerCase();
             if (tid === 'worked-for-collapsible' ||
+                tid === 'tool-group-collapsible' ||
+                tid === 'subagent-group-collapsible' ||
+                tid === 'run-command-step' ||
+                tid === 'view-file-step' ||
+                tid === 'edit-file-step' ||
+                tid === 'browser-subagent-step' ||
+                tid === 'browser-subagent-steps' ||
+                tid === 'system-message-row' ||
                 tid === 'turn-cards-container' ||
                 tid === 'artifact-card' ||
                 tid === 'changed-files-card' ||
@@ -247,6 +347,15 @@ object AntigravityBridgeScript {
                 tid === 'code-block-preview-button' ||
                 tid === 'code-block-raw-button') {
               return true;
+            }
+            const prev = el.previousElementSibling;
+            if (prev) {
+              const prevTrigger = isReasoningCollapsibleTrigger(prev)
+                ? prev
+                : (prev.querySelector ? prev.querySelector(':scope > [data-testid="worked-for-collapsible"], :scope > [data-testid="tool-group-collapsible"], :scope > [data-testid="subagent-group-collapsible"]') : null);
+              if (prevTrigger && getCollapsibleBody(prevTrigger) === el) {
+                return true;
+              }
             }
             const tag = (el.tagName || '').toLowerCase();
             if (tag === 'fieldset' && /response actions/i.test(el.getAttribute('aria-label') || '')) return true;
@@ -302,7 +411,7 @@ object AntigravityBridgeScript {
             if (/^(copy|copied|copy code|copy latex|share|edit|revert|retry|regenerate|open|review|expand|collapse|stop|cancel|more actions|send feedback|good response|bad response|thumbs up|thumbs down)\b/i.test(lower)) {
               return true;
             }
-            if (/copy|share|revert|feedback|thumb|expand reasoning|collapse reasoning|worked for/i.test(combined)) {
+            if (/copy|share|revert|feedback|thumb|expand reasoning|collapse reasoning|worked for|at mention|table options|insert in terminal/i.test(combined)) {
               return true;
             }
             if (node.closest && node.closest('[role="toolbar"], [data-testid="user-message-actions"], [data-testid="cascade-system-message-toolbar"]')) {
@@ -311,7 +420,7 @@ object AntigravityBridgeScript {
             return false;
           }
 
-          function nodeToMarkdown(node, depth) {
+          function nodeToMarkdown(node, depth, opts) {
             if (!node) return '';
             if (depth > 48) return '';
             if (node.nodeType === 3) return node.nodeValue || '';
@@ -331,7 +440,12 @@ object AntigravityBridgeScript {
             // Preserve Antigravity entity pills (files, symbols, PRs) cleanly and make document/file pills tappable!
             const tid = (node.getAttribute('data-testid') || '').toLowerCase();
             if (tid === 'markdown-code-block-preview') {
-              const innerMd = Array.from(node.childNodes).map(c => nodeToMarkdown(c, depth + 1)).join('').trim();
+              let innerRaw = '';
+              const previewChildren = node.childNodes;
+              for (let i = 0; i < previewChildren.length; i++) {
+                innerRaw += nodeToMarkdown(previewChildren[i], depth + 1, opts);
+              }
+              const innerMd = innerRaw.trim();
               if (!innerMd) return '';
               const quoted = innerMd.split('\n').map(l => '> ' + l).join('\n');
               return '\n\n' + quoted + '\n\n';
@@ -339,6 +453,9 @@ object AntigravityBridgeScript {
             if (tid === 'entity-pill' || tid.includes('pill') || tid.includes('mention')) {
               const label = cleanText(node.textContent);
               if (!label) return '';
+              if (opts && opts.preserveRawLinks) {
+                return label;
+              }
               const anchor = tag === 'a' ? node : (node.querySelector && node.querySelector('a'));
               const href = anchor ? (anchor.getAttribute('href') || '') : '';
               if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
@@ -354,6 +471,7 @@ object AntigravityBridgeScript {
               const label = cleanText(node.textContent);
               if (isUiActionButton(node, label)) return '';
               if (label.length > 0 && label.length <= 64) {
+                if (opts && opts.preserveRawLinks) return label;
                 if (/[/.]/.test(label) && /\.(md|kt|kts|java|xml|yml|yaml|json|ts|tsx|js|py|gradle|txt|sh|properties)$/i.test(label)) {
                   return '[' + label + '](ag-file://' + encodeURIComponent(label) + ')';
                 }
@@ -366,7 +484,7 @@ object AntigravityBridgeScript {
             if ((tag === 'time' || tag === 'span' || tag === 'div') && node.children.length === 0) {
               const leaf = cleanText(node.textContent);
               if (isRelativeTimestampText(leaf)) return '';
-              if (/^(you said|agent said)$/i.test(leaf)) return '';
+              if (/^(you said|agent said|agent working)$/i.test(leaf)) return '';
             }
 
             const cls = (typeof node.className === 'string' ? node.className : '').toLowerCase();
@@ -383,7 +501,7 @@ object AntigravityBridgeScript {
               // Guard against Antigravity's rendered markdown preview containers inside <pre> (avoids truncating to 1st inline <code>)
               const mdPreview = node.querySelector('[data-testid="markdown-code-block-preview"]');
               if (mdPreview) {
-                return nodeToMarkdown(mdPreview, depth + 1);
+                return nodeToMarkdown(mdPreview, depth + 1, opts);
               }
               const hasRichBlocks = !!node.querySelector('ol, ul, h1, h2, h3, h4, table');
               const directCode = node.querySelector(':scope > code');
@@ -391,7 +509,12 @@ object AntigravityBridgeScript {
               const nodeLen = cleanText(node.textContent).length;
               const codeLen = anyCode ? cleanText(anyCode.textContent).length : 0;
               if (hasRichBlocks && (!directCode || codeLen < nodeLen * 0.65)) {
-                const richMd = Array.from(node.childNodes).map(c => nodeToMarkdown(c, depth + 1)).join('').trim();
+                let richRaw = '';
+                const preChildren = node.childNodes;
+                for (let i = 0; i < preChildren.length; i++) {
+                  richRaw += nodeToMarkdown(preChildren[i], depth + 1, opts);
+                }
+                const richMd = richRaw.trim();
                 if (richMd) {
                   return '\n\n' + richMd.split('\n').map(l => '> ' + l).join('\n') + '\n\n';
                 }
@@ -436,9 +559,11 @@ object AntigravityBridgeScript {
             if (tag === 'br') return '\n';
             if (tag === 'hr') return '\n\n---\n\n';
 
-            const childrenMd = Array.from(node.childNodes)
-              .map(c => nodeToMarkdown(c, depth + 1))
-              .join('');
+            let childrenMd = '';
+            const childNodes = node.childNodes;
+            for (let i = 0; i < childNodes.length; i++) {
+              childrenMd += nodeToMarkdown(childNodes[i], depth + 1, opts);
+            }
 
             switch (tag) {
               case 'h1': return '\n\n# ' + cleanText(childrenMd) + '\n\n';
@@ -463,6 +588,13 @@ object AntigravityBridgeScript {
               case 'a': {
                 const href = node.getAttribute('href') || '';
                 const label = cleanText(childrenMd) || href;
+                if (opts && opts.preserveRawLinks) {
+                  return label || '';
+                }
+                const prevTxt = node.previousSibling && node.previousSibling.nodeType === 3 ? (node.previousSibling.nodeValue || '') : '';
+                if (label === href && /\]\(\s*$/.test(prevTxt)) {
+                  return label;
+                }
                 if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
                   return '[' + label + '](' + href + ')';
                 }
@@ -484,7 +616,7 @@ object AntigravityBridgeScript {
                   .map(li => {
                     const cb = li.querySelector && li.querySelector(':scope > input[type="checkbox"], :scope > p > input[type="checkbox"]');
                     const taskPrefix = cb ? (cb.checked ? '[x] ' : '[ ] ') : '';
-                    const subLines = nodeToMarkdown(li, listDepth + 1).trim().split('\n')
+                    const subLines = nodeToMarkdown(li, listDepth + 1, opts).trim().split('\n')
                       .map((ln, idx) => idx === 0 ? ('- ' + taskPrefix + cleanText(ln)) : (indent + '  ' + ln.trimStart()));
                     return indent + subLines.join('\n');
                   })
@@ -496,7 +628,7 @@ object AntigravityBridgeScript {
                 const items = Array.from(node.children)
                   .filter(c => (c.tagName || '').toLowerCase() === 'li')
                   .map((li, idx) => {
-                    const subLines = nodeToMarkdown(li, depth + 1).trim().split('\n')
+                    const subLines = nodeToMarkdown(li, depth + 1, opts).trim().split('\n')
                       .map((ln, liIdx) => liIdx === 0 ? ((idx + 1) + '. ' + cleanText(ln)) : (indent + '  ' + ln.trimStart()));
                     return indent + subLines.join('\n');
                   })
@@ -507,7 +639,7 @@ object AntigravityBridgeScript {
                 const rows = Array.from(node.querySelectorAll('tr'));
                 if (!rows.length) return '';
                 const mdRows = rows.map(tr =>
-                  Array.from(tr.children).map(cell => cleanText(nodeToMarkdown(cell, depth + 1)).replace(/\|/g, '\\|'))
+                  Array.from(tr.children).map(cell => cleanText(nodeToMarkdown(cell, depth + 1, opts)).replace(/\|/g, '\\|'))
                 );
                 const colCount = Math.max(...mdRows.map(r => r.length), 1);
                 const header = '| ' + mdRows[0].join(' | ') + ' |';
@@ -556,13 +688,196 @@ object AntigravityBridgeScript {
             return '';
           }
 
+          function inferFileBadge(fileName) {
+            const extMatch = (fileName || '').match(/\.([A-Za-z0-9]{1,6})$/);
+            if (!extMatch) return 'FILE';
+            return extMatch[1].toUpperCase().slice(0, 4);
+          }
+
+          function extractStepDetail(detailContainer) {
+            if (!detailContainer) return '';
+            const preList = Array.from(detailContainer.querySelectorAll('pre'));
+            if (preList.length > 0) {
+              const md = normalizeMarkdown(nodeToMarkdown(detailContainer, 0));
+              if (md) return md;
+            }
+            const mdRoot = detailContainer.querySelector('[data-markdown-root]');
+            if (mdRoot) {
+              return normalizeMarkdown(nodeToMarkdown(mdRoot, 0)) || cleanText(mdRoot.innerText || mdRoot.textContent);
+            }
+            return normalizeMarkdown(nodeToMarkdown(detailContainer, 0)) || cleanText(detailContainer.innerText || detailContainer.textContent);
+          }
+
+          function parseReasoningStepRow(rowEl, stepId) {
+            if (!rowEl) return null;
+            const stepRoot = rowEl.querySelector('[data-testid]') || rowEl;
+            const rowTid = (rowEl.getAttribute('data-testid') || '').toLowerCase();
+            const tid = ((stepRoot.getAttribute('data-testid') || '') + ' ' + rowTid).toLowerCase();
+            const btn = stepRoot.querySelector('button, [role="button"]') ||
+              (stepRoot.matches && stepRoot.matches('button, [role="button"]') ? stepRoot : null) ||
+              rowEl.querySelector('button, [role="button"]');
+            const hasChevron = !!(btn && (btn.querySelector('svg') || btn.hasAttribute('aria-expanded')));
+            const titleNode = rowEl.querySelector('[title], a, [data-testid="entity-pill"]') || btn || stepRoot;
+            const attrTitle = titleNode && titleNode.getAttribute ? (titleNode.getAttribute('title') || '').trim() : '';
+            const fileUriAttr = (rowEl.getAttribute('data-file-uri') ||
+              (rowEl.querySelector('[data-file-uri]') && rowEl.querySelector('[data-file-uri]').getAttribute('data-file-uri')) ||
+              '').trim();
+
+            const rowText = cleanText(rowEl.innerText || rowEl.textContent);
+            const btnText = btn ? cleanText(btn.innerText || btn.textContent) : '';
+            const isDiffStatOnly = t => /^(?:[+−-]\s*\d+(?:\s+[+−-]\s*\d+)?|\+\s*\d+\s*[-−]\s*\d+)$/.test((t || '').trim());
+
+            let rawTitle = (btnText && !isDiffStatOnly(btnText))
+              ? btnText
+              : (rowText || cleanText(stepRoot.innerText || stepRoot.textContent));
+            if ((!rawTitle || isDiffStatOnly(rawTitle)) && attrTitle) {
+              rawTitle = attrTitle.split(/\s+—\s+/)[0].trim();
+            }
+            if (!rawTitle) return null;
+            if (rawTitle.length > 180) {
+              rawTitle = rawTitle.split('\n')[0].trim().slice(0, 180);
+            }
+
+            if (btn && stepId) {
+              btn.setAttribute('data-ag-step-id', stepId);
+            }
+
+            let detail = '';
+            if (btn && btn.nextElementSibling) {
+              detail = extractStepDetail(btn.nextElementSibling);
+            }
+            if (!detail && attrTitle.includes(' — ')) {
+              const cmdPart = attrTitle.split(/\s+—\s+/).slice(1).join(' — ').trim();
+              if (cmdPart) {
+                detail = '```\n$ ' + cmdPart + '\n```';
+              }
+            }
+
+            const searchCorpus = [rowText, rawTitle, attrTitle, fileUriAttr].filter(Boolean).join(' ');
+            const diffStatMatch = searchCorpus.match(/\+\s*(\d+)\s*[-−]\s*(\d+)/);
+            const diffStatLabel = diffStatMatch ? ('+' + diffStatMatch[1] + ' -' + diffStatMatch[2]) : '';
+            const lineMatch = searchCorpus.match(/#L\d+(?:-L?\d+)?/i);
+            const lineRange = lineMatch ? lineMatch[0] : diffStatLabel;
+            const verbMatch = searchCorpus.match(/\b(Analyzed|Edited|Read|Inspected|Created|Updated|Modified|Checked|Listed|Wrote)\b/i);
+            const actionVerb = verbMatch ? verbMatch[1] : '';
+            const fileTokenMatch = searchCorpus.match(/(?:^|\s|\/)([A-Za-z0-9_.\-/]+\.(?:md|kt|kts|java|xml|yml|yaml|json|ts|tsx|js|jsx|py|gradle|txt|sh|properties|toml|css|html|cpp|cc|c|h|hpp|rs|go|swift|dart|sql|rb|php))\b/i);
+            const isFileStep = tid.includes('view-file') ||
+              tid.includes('edit-file') ||
+              tid.includes('changed-file') ||
+              (!!lineMatch && rawTitle.length < 140) ||
+              (!!fileTokenMatch && (!!actionVerb || !!diffStatMatch || !!rowEl.querySelector('a, [data-testid="entity-pill"], [data-file-uri]')));
+
+            let kind = 'note';
+            let fileName = '';
+            let badgeText = '';
+            let cleanTitle = rawTitle;
+
+            if (isFileStep) {
+              kind = 'file';
+              fileName = fileTokenMatch
+                ? fileTokenMatch[1]
+                : rawTitle
+                    .replace(/^(?:Analyzed|Edited|Read|Inspected|Created|Updated|Modified|Checked|Listed|Wrote)\s+/i, '')
+                    .replace(/#L\d+(?:-L?\d+)?/i, '')
+                    .replace(/\+\s*\d+\s*[-−]\s*\d+/g, '')
+                    .trim();
+              badgeText = inferFileBadge(fileName || rawTitle);
+              cleanTitle = fileName || rawTitle;
+            } else if (
+              tid.includes('run-command') ||
+              tid.includes('command') ||
+              tid.includes('system-message') ||
+              tid.includes('grep') ||
+              tid.includes('find')
+            ) {
+              kind = 'command';
+            } else if (hasChevron && !isDiffStatOnly(btnText)) {
+              kind = 'command';
+            }
+
+            return {
+              id: stepId,
+              title: cleanTitle,
+              kind: kind,
+              detail: detail,
+              fileName: fileName,
+              lineRange: lineRange,
+              badgeText: badgeText,
+              actionVerb: actionVerb,
+              isExpandable: (hasChevron && !isDiffStatOnly(btnText)) || detail.length > 0
+            };
+          }
+
+          function extractReasoningSectionsFromNode(el, reasonId) {
+            if (!el) return [];
+            if (!isReasoningCollapsibleTrigger(el)) return [];
+            const sib = getCollapsibleBody(el);
+            if (!sib) return [];
+            sib.setAttribute('data-ag-reason-body', 'true');
+
+            const rootRows = sib.querySelector(':scope > [data-step-rows="true"]') ||
+              sib.querySelector('[data-step-rows="true"]') ||
+              sib;
+            const sections = [];
+            let pendingDirectSteps = [];
+            let secCounter = 0;
+
+            function flushDirect() {
+              if (pendingDirectSteps.length > 0) {
+                sections.push({
+                  id: reasonId + '-dir-' + (secCounter++),
+                  title: '',
+                  steps: pendingDirectSteps,
+                  defaultExpanded: true
+                });
+                pendingDirectSteps = [];
+              }
+            }
+
+            Array.from(rootRows.children).forEach(child => {
+              const grpBtn = (child.matches && child.matches('[data-testid="tool-group-collapsible"]'))
+                ? child
+                : (child.querySelector ? child.querySelector(':scope > [data-testid="tool-group-collapsible"], :scope > div > [data-testid="tool-group-collapsible"]') : null);
+              if (grpBtn) {
+                flushDirect();
+                const secId = reasonId + '-sec-' + (secCounter++);
+                grpBtn.setAttribute('data-ag-sec-id', secId);
+                const secTitle = cleanText(grpBtn.getAttribute('aria-label') || grpBtn.textContent) || 'Steps';
+                const secExpanded = grpBtn.getAttribute('aria-expanded') === 'true';
+                const grpBody = getCollapsibleBody(grpBtn);
+                const grpRowsEl = grpBody
+                  ? (grpBody.querySelector('[data-step-rows="true"]') || grpBody)
+                  : null;
+                const steps = [];
+                if (grpRowsEl) {
+                  Array.from(grpRowsEl.children).forEach((rowChild, stIdx) => {
+                    const parsed = parseReasoningStepRow(rowChild, secId + '-st-' + stIdx);
+                    if (parsed) steps.push(parsed);
+                  });
+                }
+                sections.push({
+                  id: secId,
+                  title: secTitle,
+                  steps: steps,
+                  defaultExpanded: secExpanded
+                });
+              } else {
+                const stId = reasonId + '-st-' + pendingDirectSteps.length + '-' + secCounter;
+                const parsed = parseReasoningStepRow(child, stId);
+                if (parsed) pendingDirectSteps.push(parsed);
+              }
+            });
+            flushDirect();
+            return sections;
+          }
+
           function extractReasoningBodyFromNode(el) {
             if (!el) return '';
-            const tid = (el.getAttribute('data-testid') || '').toLowerCase();
-            // Antigravity mounts step/thought rows inside el.nextElementSibling when aria-expanded="true"
-            if (tid === 'worked-for-collapsible') {
-              const sib = el.nextElementSibling;
+            // Antigravity mounts step/thought rows inside CollapsibleRow body only when aria-expanded="true"
+            if (isReasoningCollapsibleTrigger(el)) {
+              const sib = getCollapsibleBody(el);
               if (sib) {
+                sib.setAttribute('data-ag-reason-body', 'true');
                 const stepRows = Array.from(sib.querySelectorAll('[data-testid="tool-group-collapsible"], [data-step-rows="true"] > div, p, li, blockquote, pre'))
                   .filter(node => {
                     const parentCollapsible = node.closest('[data-testid="tool-group-collapsible"]');
@@ -595,33 +910,130 @@ object AntigravityBridgeScript {
             return normalizeMarkdown(nodeToMarkdown(clone, 0)) || cleanText(clone.textContent);
           }
 
-          function extractReasoningBlocks(container, stableMsgId) {
-            const blocks = [];
-            const seen = new Set();
-            const nodes = Array.from(container.querySelectorAll('[data-testid="worked-for-collapsible"], details'));
-            nodes.forEach((el, idx) => {
-              if (seen.has(el)) return;
-              seen.add(el);
-
-              const isBtn = (el.tagName || '').toLowerCase() === 'button';
-              const summaryEl = isBtn ? el : el.querySelector('summary, button, [role="button"]');
-              const rawSummary = summaryEl ? cleanText(summaryEl.textContent) : '';
-              const durationMatch = rawSummary.match(/(\d+\s*(?:ms|s|sec|secs|seconds|m|min))/i);
-              const duration = durationMatch ? durationMatch[1] : '';
-              // Normalize title cleanly so "Worked for 1m" doesn't repeat "1m" in title + badge
-              const title = /^worked\s+for\s+/i.test(rawSummary) ? 'Reasoning' : (rawSummary || 'Reasoning');
-              const body = extractReasoningBodyFromNode(el);
-              el.setAttribute('data-ag-reason-id', 'reason-' + stableMsgId + '-' + idx);
-
-              blocks.push({
-                id: 'reason-' + stableMsgId + '-' + idx,
+          function buildReasoningBlockFromTrigger(el, reasonId) {
+            const isBtn = (el.tagName || '').toLowerCase() === 'button';
+            const summaryEl = isBtn ? el : el.querySelector('summary, button, [role="button"]');
+            const rawSummary = summaryEl ? cleanText(summaryEl.textContent) : '';
+            const durationMatch = rawSummary.match(/(\d+\s*(?:ms|s|sec|secs|seconds|m|min|h|hr))/i);
+            const duration = durationMatch ? durationMatch[1] : '';
+            const title = rawSummary || 'Worked';
+            el.setAttribute('data-ag-reason-id', reasonId);
+            const sib = getCollapsibleBody(el);
+            const sections = extractReasoningSectionsFromNode(el, reasonId);
+            const body = sections.length > 0 ? '' : extractReasoningBodyFromNode(el);
+            return {
+              block: {
+                id: reasonId,
                 title: title,
                 duration: duration,
                 content: body,
+                sections: sections,
                 isStreaming: /thinking|working|reasoning\.\.\./i.test(rawSummary)
-              });
-            });
-            return blocks;
+              },
+              collapsibleBody: sib
+            };
+          }
+
+          function extractAssistantSegments(container, stableMsgId) {
+            const rawTriggers = container.querySelectorAll('[data-testid="worked-for-collapsible"], details');
+            if (!rawTriggers || rawTriggers.length === 0) {
+              const md = normalizeMarkdown(nodeToMarkdown(container, 0));
+              const segments = md ? [{ id: 'seg-' + stableMsgId + '-0', kind: 'markdown', markdown: md }] : [];
+              return { markdown: md, reasoning: [], segments: segments };
+            }
+
+            const topTriggers = [];
+            for (let i = 0; i < rawTriggers.length; i++) {
+              const t = rawTriggers[i];
+              let nested = false;
+              for (let j = 0; j < topTriggers.length; j++) {
+                if (topTriggers[j].contains(t)) {
+                  nested = true;
+                  break;
+                }
+              }
+              if (!nested) topTriggers.push(t);
+            }
+
+            const triggerSet = new Set(topTriggers);
+            const ancestorSet = new Set();
+            for (let i = 0; i < topTriggers.length; i++) {
+              let p = topTriggers[i].parentElement;
+              while (p) {
+                ancestorSet.add(p);
+                if (p === container) break;
+                p = p.parentElement;
+              }
+            }
+
+            const excludedBodies = new Set();
+            const segments = [];
+            const reasoning = [];
+            const proseChunks = [];
+            let mdBuffer = '';
+            let reasonIdx = 0;
+            let segIdx = 0;
+
+            function flushMarkdown() {
+              if (!mdBuffer) return;
+              const md = normalizeMarkdown(mdBuffer);
+              mdBuffer = '';
+              if (md) {
+                proseChunks.push(md);
+                segments.push({
+                  id: 'seg-' + stableMsgId + '-' + (segIdx++),
+                  kind: 'markdown',
+                  markdown: md
+                });
+              }
+            }
+
+            function walkTurn(node, depth) {
+              if (!node || depth > 48) return;
+              if (node.nodeType === 3) {
+                mdBuffer += (node.nodeValue || '');
+                return;
+              }
+              if (node.nodeType !== 1) return;
+              if (excludedBodies.has(node)) return;
+
+              if (triggerSet.has(node)) {
+                flushMarkdown();
+                const reasonId = 'reason-' + stableMsgId + '-' + (reasonIdx++);
+                const parsed = buildReasoningBlockFromTrigger(node, reasonId);
+                if (parsed.collapsibleBody && parsed.collapsibleBody !== node) {
+                  excludedBodies.add(parsed.collapsibleBody);
+                }
+                reasoning.push(parsed.block);
+                segments.push({
+                  id: 'seg-' + stableMsgId + '-' + (segIdx++),
+                  kind: 'reasoning',
+                  reasoningId: parsed.block.id
+                });
+                return;
+              }
+
+              if (isExcludedFromMarkdown(node)) return;
+              if (!ancestorSet.has(node)) {
+                if (isReasoningElement(node)) return;
+                mdBuffer += nodeToMarkdown(node, depth);
+                return;
+              }
+
+              const children = node.childNodes;
+              for (let i = 0; i < children.length; i++) {
+                walkTurn(children[i], depth + 1);
+              }
+            }
+
+            walkTurn(container, 0);
+            flushMarkdown();
+
+            return {
+              markdown: proseChunks.join('\n\n'),
+              reasoning: reasoning,
+              segments: segments
+            };
           }
 
           function extractArtifacts(container, stableMsgId) {
@@ -759,27 +1171,56 @@ object AntigravityBridgeScript {
 
           function extractConversations() {
             const root = getAppRoot();
-            const rows = Array.from(root.querySelectorAll('[data-testid="conversation-row-sidebar"]'));
+            const sidebarScope = root.querySelector('[data-testid="conversation-list-sidebar"]') || root;
+            const rows = sidebarScope.querySelectorAll('[data-testid="conversation-row-sidebar"]');
             if (rows.length === 0) {
               const breadcrumbEl = root.querySelector('[data-testid="breadcrumb-segment"]');
               const breadcrumbTitle = breadcrumbEl ? cleanText(breadcrumbEl.textContent) : '';
-              cachedConversations = cachedConversations.map(c => {
+              let changed = false;
+              const updated = cachedConversations.map(c => {
                 const activeByUrl = !!(c.url && c.url === window.location.href);
                 const activeByTitle = !!(breadcrumbTitle && c.title === breadcrumbTitle);
-                return Object.assign({}, c, { isActive: activeByUrl || activeByTitle });
+                const nextActive = activeByUrl || activeByTitle;
+                if (c.isActive !== nextActive) {
+                  changed = true;
+                  return Object.assign({}, c, { isActive: nextActive });
+                }
+                return c;
               });
+              if (changed) {
+                cachedConversations = updated;
+                saveStore();
+              }
               return cachedConversations;
             }
 
+            const streamNodes = sidebarScope.querySelectorAll(
+              '[data-testid="section-header"], [data-testid="project-header"], [data-testid="conversation-row-sidebar"]'
+            );
             const result = [];
             const seen = new Set();
-            rows.forEach((row, idx) => {
-              const anchor = row.querySelector('a') || row.querySelector('button');
-              if (!anchor) return;
+            let currentProject = '';
+            let convIdx = 0;
+
+            for (let i = 0; i < streamNodes.length; i++) {
+              const node = streamNodes[i];
+              const tid = node.getAttribute('data-testid');
+              if (tid === 'project-header') {
+                currentProject = cleanText(node.textContent);
+                continue;
+              }
+              if (tid === 'section-header') {
+                currentProject = '';
+                continue;
+              }
+              if (tid !== 'conversation-row-sidebar') continue;
+
+              const anchor = node.querySelector('a') || node.querySelector('button');
+              if (!anchor) continue;
               const ariaTitle = cleanText(anchor.getAttribute('aria-label'));
               const fallbackText = cleanText(anchor.textContent).replace(/(\d+\s*(?:s|m|h|d|w|mo|y))$/i, '').trim();
               const title = ariaTitle || fallbackText;
-              if (!title || title.length < 2) return;
+              if (!title || title.length < 2) continue;
 
               const href = anchor.getAttribute('href') || '';
               let fullUrl = '';
@@ -787,25 +1228,26 @@ object AntigravityBridgeScript {
                 try { fullUrl = new URL(href, window.location.origin).href; } catch (_) {}
               }
 
-              const updatedLabel = extractRelativeTime(row, title);
-              const key = fullUrl || (title + '#' + idx);
-              if (seen.has(key)) return;
+              const updatedLabel = extractRelativeTime(node, title);
+              const key = fullUrl || (title + '#' + convIdx);
+              if (seen.has(key)) continue;
               seen.add(key);
 
               const isActive = (fullUrl && fullUrl === window.location.href) ||
                 anchor.getAttribute('aria-current') === 'page' ||
-                row.getAttribute('data-active') === 'true';
+                node.getAttribute('data-active') === 'true';
 
               result.push({
-                id: 'conv-' + idx + '-' + title.slice(0, 24),
+                id: 'conv-' + convIdx + '-' + title.slice(0, 24),
                 title: title,
                 url: fullUrl,
-                projectName: '',
+                projectName: currentProject,
                 preview: '',
                 updatedLabel: updatedLabel,
                 isActive: isActive
               });
-            });
+              convIdx++;
+            }
 
             if (result.length > 0) {
               cachedConversations = result;
@@ -814,77 +1256,219 @@ object AntigravityBridgeScript {
             return cachedConversations;
           }
 
-          function extractMessages() {
+          function normalizeUserPromptText(md) {
+            return (md || '')
+              .replace(/\n{3,}/g, '\n\n')
+              .replace(/^\s*You said\s*/i, '')
+              .trim();
+          }
+
+          function resolveTurnNodes(convView) {
+            let turnNodes = Array.from(
+              convView.querySelectorAll('[data-testid="user-message"], [data-testid="agent-response"]')
+            );
+            const fallbackCandidates = convView.querySelectorAll('[data-markdown-root], fieldset[aria-label*="Response actions" i]');
+            if (fallbackCandidates.length > 0) {
+              const merged = new Set(turnNodes);
+              const mergedArr = turnNodes.slice();
+              let addedAny = false;
+              for (let i = 0; i < fallbackCandidates.length; i++) {
+                const cand = fallbackCandidates[i];
+                if (cand.closest('[data-testid="user-message"], [data-testid="agent-response"]')) continue;
+                const el = cand.closest('[data-turn-content], [data-session-message-id]') || cand.parentElement;
+                if (!el || el === convView || merged.has(el)) continue;
+                let overlaps = false;
+                for (let j = 0; j < mergedArr.length; j++) {
+                  const existing = mergedArr[j];
+                  if (existing === el || existing.contains(el) || el.contains(existing)) {
+                    overlaps = true;
+                    break;
+                  }
+                }
+                if (!overlaps) {
+                  merged.add(el);
+                  mergedArr.push(el);
+                  addedAny = true;
+                }
+              }
+              if (addedAny) {
+                turnNodes = mergedArr.sort((a, b) =>
+                  (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1
+                );
+              }
+            }
+            return turnNodes;
+          }
+
+          function extractMessages(isStreamingNow) {
             const root = getAppRoot();
             const convView = root.querySelector('[data-testid="conversation-view"]');
             if (!convView || !isVisible(convView)) {
               return [];
             }
 
-            const turnNodes = Array.from(
-              convView.querySelectorAll('[data-testid="user-message"], [data-testid="agent-response"]')
-            );
-            const rawMsgs = [];
+            const turnNodes = resolveTurnNodes(convView);
+            const domNodeIds = store.domNodeIds || (store.domNodeIds = new WeakMap());
+            const turnCache = store.turnExtractCache || (store.turnExtractCache = new WeakMap());
 
-            turnNodes.forEach((el) => {
+            const rawMsgs = [];
+            for (let idx = 0; idx < turnNodes.length; idx++) {
+              const el = turnNodes[idx];
               const tid = (el.getAttribute('data-testid') || '').toLowerCase();
               const isUser = tid === 'user-message';
-              const timestamp = extractMessageTimestamp(el);
+              const isActiveLastTurn = !!isStreamingNow && idx === turnNodes.length - 1;
+              const rawText = el.textContent || '';
+              const expandedCount = isUser ? 0 : el.querySelectorAll('[aria-expanded="true"], details[open]').length;
+              const turnSig = (isUser ? 'u:' : 'a:') + rawText.length + ':' + expandedCount + ':' +
+                fastHash(rawText.slice(0, 180) + '|' + rawText.slice(-180));
 
+              const cachedEntry = !isActiveLastTurn ? turnCache.get(el) : null;
+              if (cachedEntry && cachedEntry.sig === turnSig) {
+                rawMsgs.push({
+                  el: el,
+                  role: cachedEntry.msg.role,
+                  baseHash: cachedEntry.baseHash,
+                  isStreamingTurn: false,
+                  cachedMsg: cachedEntry.msg,
+                  turnSig: turnSig
+                });
+                continue;
+              }
+
+              const timestamp = extractMessageTimestamp(el);
               if (isUser) {
                 const contentEl = el.querySelector('[data-testid="user-message-content"]') || el;
-                const md = normalizeMarkdown(nodeToMarkdown(contentEl, 0));
-                if (!md) return;
-                rawMsgs.push({ el, role: 'user', md, timestamp, baseHash: 'u-' + fastHash(md.slice(0, 160)) });
+                const md = normalizeUserPromptText(nodeToMarkdown(contentEl, 0, { preserveRawLinks: true }));
+                if (!md) continue;
+                rawMsgs.push({
+                  el: el,
+                  role: 'user',
+                  md: md,
+                  timestamp: timestamp,
+                  baseHash: 'u-' + fastHash(md.slice(0, 160)),
+                  isStreamingTurn: false,
+                  turnSig: turnSig
+                });
               } else {
-                const md = normalizeMarkdown(nodeToMarkdown(el, 0));
-                const reasoningCount = el.querySelectorAll('[data-testid="worked-for-collapsible"], details').length;
                 const artCount = el.querySelectorAll('[data-testid="artifact-card"], [data-testid="changed-files-card"]').length;
-                if (!md && reasoningCount === 0 && artCount === 0) return;
                 const firstR = el.querySelector('[data-testid="worked-for-collapsible"], details');
-                const sig = md ? md.slice(0, 160) : (firstR ? cleanText(firstR.textContent) : String(artCount));
-                rawMsgs.push({ el, role: 'assistant', md, timestamp, baseHash: 'a-' + fastHash(sig) });
-              }
-            });
-
-            // Assign prepend-invariant IDs by counting occurrences from the BOTTOM of the thread
-            const bottomCounts = Object.create(null);
-            const resolvedIds = new Array(rawMsgs.length);
-            for (let i = rawMsgs.length - 1; i >= 0; i--) {
-              const item = rawMsgs[i];
-              const domId = item.el.getAttribute('data-message-id') || '';
-              if (domId) {
-                resolvedIds[i] = domId;
-              } else {
-                const occ = (bottomCounts[item.baseHash] || 0);
-                bottomCounts[item.baseHash] = occ + 1;
-                resolvedIds[i] = item.baseHash + '-' + occ;
+                const mdRoot = el.querySelector('[data-markdown-root]');
+                const cleanFallback = cleanText(mdRoot ? mdRoot.textContent : rawText);
+                if (!cleanFallback && !firstR && artCount === 0 && !isActiveLastTurn) {
+                  continue;
+                }
+                const sigText = cleanFallback
+                  ? cleanFallback.slice(0, 160)
+                  : (firstR ? cleanText(firstR.textContent) : String(artCount));
+                rawMsgs.push({
+                  el: el,
+                  role: 'assistant',
+                  artCount: artCount,
+                  timestamp: timestamp,
+                  baseHash: 'a-' + fastHash(sigText),
+                  isStreamingTurn: isActiveLastTurn,
+                  turnSig: turnSig
+                });
               }
             }
 
-            return rawMsgs.map((item, i) => {
+            // Assign prepend-invariant & streaming-stable IDs using WeakMap + bottom-up occurrence counts
+            const bottomCounts = Object.create(null);
+            const resolvedIds = new Array(rawMsgs.length);
+            const usedIds = new Set();
+
+            for (let i = rawMsgs.length - 1; i >= 0; i--) {
+              const item = rawMsgs[i];
+              const domId = item.el.getAttribute('data-message-id') || item.el.getAttribute('data-session-message-id') || '';
+              if (domId && !usedIds.has(domId)) {
+                resolvedIds[i] = domId;
+                usedIds.add(domId);
+              } else if (domNodeIds.has(item.el)) {
+                const cachedId = domNodeIds.get(item.el);
+                if (cachedId && !usedIds.has(cachedId)) {
+                  resolvedIds[i] = cachedId;
+                  usedIds.add(cachedId);
+                }
+              }
+            }
+
+            for (let i = rawMsgs.length - 1; i >= 0; i--) {
+              if (resolvedIds[i]) continue;
+              const item = rawMsgs[i];
+              let id;
+              if (item.isStreamingTurn) {
+                store.streamIdSeq = (store.streamIdSeq || 0) + 1;
+                id = 'stream-' + store.streamIdSeq;
+              } else {
+                let occ = bottomCounts[item.baseHash] || 0;
+                while (usedIds.has(item.baseHash + '-' + occ)) occ++;
+                bottomCounts[item.baseHash] = occ + 1;
+                id = item.baseHash + '-' + occ;
+              }
+              resolvedIds[i] = id;
+              usedIds.add(id);
+              domNodeIds.set(item.el, id);
+            }
+
+            const out = [];
+            for (let i = 0; i < rawMsgs.length; i++) {
+              const item = rawMsgs[i];
               const id = resolvedIds[i];
+              if (item.cachedMsg && item.cachedMsg.id === id) {
+                out.push(item.cachedMsg);
+                continue;
+              }
               if (item.role === 'user') {
-                return {
+                const msg = {
                   id: id,
                   role: 'user',
-                  markdown: item.md,
-                  timestamp: item.timestamp,
+                  markdown: item.md !== undefined ? item.md : item.cachedMsg.markdown,
+                  timestamp: item.timestamp !== undefined ? item.timestamp : item.cachedMsg.timestamp,
                   reasoning: [],
                   artifacts: [],
+                  segments: [],
                   isStreaming: false
                 };
+                turnCache.set(item.el, { sig: item.turnSig, baseHash: item.baseHash, msg: msg });
+                out.push(msg);
+              } else {
+                const extracted = extractAssistantSegments(item.el, id);
+                const artifacts = extractArtifacts(item.el, id);
+                if (!extracted.markdown && extracted.reasoning.length === 0 && artifacts.length === 0 && !item.isStreamingTurn) {
+                  continue;
+                }
+                const msg = {
+                  id: id,
+                  role: 'assistant',
+                  markdown: extracted.markdown,
+                  timestamp: item.timestamp !== undefined ? item.timestamp : item.cachedMsg.timestamp,
+                  reasoning: extracted.reasoning,
+                  artifacts: artifacts,
+                  segments: extracted.segments,
+                  isStreaming: !!item.isStreamingTurn
+                };
+                if (!item.isStreamingTurn) {
+                  turnCache.set(item.el, { sig: item.turnSig, baseHash: item.baseHash, msg: msg });
+                }
+                out.push(msg);
               }
-              return {
-                id: id,
-                role: 'assistant',
-                markdown: item.md,
-                timestamp: item.timestamp,
-                reasoning: extractReasoningBlocks(item.el, id),
-                artifacts: extractArtifacts(item.el, id),
-                isStreaming: false
-              };
-            });
+            }
+            return out;
+          }
+
+          function stripEffortFromModelName(str) {
+            return (str || '')
+              .trim()
+              .replace(/\s*\((Minimal|Low|Medium|High|Extra|Fast)\)\s*$/i, '')
+              .replace(/\s+(Minimal|Low|Medium|High|Extra|Fast)\s*$/i, '')
+              .trim()
+              .toLowerCase();
+          }
+
+          function matchesModelBaseName(activeModel, modelName) {
+            const activeBase = stripEffortFromModelName(activeModel);
+            const candidateBase = stripEffortFromModelName(modelName);
+            return !!activeBase && !!candidateBase && activeBase === candidateBase;
           }
 
           function defaultEffortsForModel(name) {
@@ -913,9 +1497,9 @@ object AntigravityBridgeScript {
                 seen.add(name);
                 const siblingSpans = Array.from(btn.querySelectorAll('span'))
                   .map(s => cleanText(s.textContent))
-                  .filter(t => t && t !== name && /^(Low|Medium|High|Extra|Fast)$/i.test(t));
+                  .filter(t => t && t !== name && /^(Minimal|Low|Medium|High|Extra|Fast)$/i.test(t));
                 const tier = siblingSpans[0] || '';
-                const isSelected = activeModel.toLowerCase().startsWith(name.toLowerCase());
+                const isSelected = matchesModelBaseName(activeModel, name);
                 const knownEfforts = cachedEffortMap[name.toLowerCase()] || defaultEffortsForModel(name);
                 items.push({
                   id: 'effort-' + name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
@@ -933,8 +1517,8 @@ object AntigravityBridgeScript {
                 const name = fullText;
                 if (!name || seen.has(name)) return;
                 seen.add(name);
-                const base = name.replace(/\s*\([^)]+\)\s*$/, '').toLowerCase();
-                const isSelected = activeModel.toLowerCase().startsWith(base);
+                const base = stripEffortFromModelName(name);
+                const isSelected = matchesModelBaseName(activeModel, name);
                 items.push({
                   id: 'item-' + base.replace(/[^a-z0-9]+/g, '-'),
                   name: name,
@@ -970,17 +1554,20 @@ object AntigravityBridgeScript {
 
           function parseUsagePane(pane) {
             if (!pane) return null;
+            if (pane.querySelector && pane.querySelector('[data-testid="model-selector-panel"], [data-testid="model-selector-effort-group"], [data-testid="model-selector-effort-option"]')) {
+              return null;
+            }
             const rawLines = extractLinesFromNode(pane)
               .filter(l => l.length > 0 && !/^(back|view usage|usage|quota|model|close|done)$/i.test(l));
             if (rawLines.length === 0) return null;
 
             const joined = rawLines.join(' • ');
-            if (/gemini 4 neon.*gemini 4 carbon/i.test(joined) || /thinking effort/i.test(joined)) {
+            if (/thinking effort/i.test(joined)) {
               return null;
             }
 
             const limits = [];
-            if (/^\s*(refreshing|loading)\b/i.test(joined) && !/\d{1,3}\s*%/.test(joined)) {
+            if (/^\s*(refreshing|loading)\b/i.test(joined) && !/\d{1,3}(?:\.\d+)?\s*%/.test(joined)) {
               return null;
             }
             let currentGroup = '';
@@ -989,7 +1576,7 @@ object AntigravityBridgeScript {
             const isWindowLine = l => /^(?:5\s*h(?:our|r)?|weekly|hourly|daily|monthly|session)\s*limit\b/i.test(l) ||
               /\b(?:5\s*h(?:our|r)?|weekly)\s+limit\b/i.test(l);
             const extractPct = l => {
-              const m = l.match(/(\d{1,3})\s*%\s*(left|remaining|used)?/i);
+              const m = l.match(/(\d{1,3}(?:\.\d+)?)\s*%\s*(left|remaining|used)?/i);
               if (!m) return null;
               const rawVal = Math.max(0, Math.min(100, parseFloat(m[1])));
               const kind = (m[2] || '').toLowerCase();
@@ -1005,7 +1592,7 @@ object AntigravityBridgeScript {
                 const inlinePct = extractPct(line);
                 const cleanWindow = /5\s*h/i.test(line)
                   ? '5h limit'
-                  : (/weekly/i.test(line) ? 'Weekly limit' : line.replace(/\d{1,3}\s*%.*$/, '').trim());
+                  : (/weekly/i.test(line) ? 'Weekly limit' : line.replace(/\d{1,3}(?:\.\d+)?\s*%.*$/, '').trim());
                 activeLimit = {
                   id: 'lim-' + limits.length + '-' + (currentGroup || 'all').toLowerCase().replace(/[^a-z0-9]+/g, '-'),
                   groupName: currentGroup || 'Antigravity',
@@ -1041,7 +1628,7 @@ object AntigravityBridgeScript {
               }
 
               // Likely a model-family group heading such as "Gemini Models" or "Claude and GPT models"
-              if (line.length >= 3 && line.length <= 56 && !/(unlimited|available|credits)/i.test(line)) {
+              if (line.length >= 3 && line.length <= 56 && !/^(?:unlimited|available|credits|none|n\/a|refreshing|loading|\d+(?:\.\d+)?%?)$/i.test(line) && !/(unlimited|available|credits)/i.test(line)) {
                 if (activeLimit) {
                   limits.push(activeLimit);
                   activeLimit = null;
@@ -1093,11 +1680,11 @@ object AntigravityBridgeScript {
             if (weeklyPct !== null) summaryParts.push('Weekly: ' + Math.round(weeklyPct) + '% left');
             const summaryLine = summaryParts.length > 0
               ? summaryParts.join(' • ')
-              : (rawLines.find(l => /(\d+\s*%|remaining|left|quota|limit|available|credits|unlimited)/i.test(l))
+              : (rawLines.find(l => /(\d+(?:\.\d+)?\s*%|remaining|left|quota|limit|available|credits|unlimited)/i.test(l))
                   || rawLines.slice(0, 2).join(' • ')
                   || '');
 
-            if (limits.length === 0 && fallbackLeftPct === null && !/(\d+\s*%|resets?\s+(?:in|at|on)|unlimited)/i.test(summaryLine)) {
+            if (limits.length === 0 && fallbackLeftPct === null && !/(\d+(?:\.\d+)?\s*%|resets?\s+(?:in|at|on)|unlimited)/i.test(summaryLine)) {
               return null;
             }
 
@@ -1120,17 +1707,46 @@ object AntigravityBridgeScript {
             };
           }
 
+          function isCancelOrStopButton(el) {
+            if (!el || !isVisible(el)) return false;
+            const tid = (el.getAttribute('data-testid') || '').toLowerCase();
+            if (tid === 'input-cancel-button' || tid === 'send-button-cancel' || tid === 'webview-agent-cursor-stop-button') {
+              return true;
+            }
+            if (tid.includes('modal') || tid.includes('delete') || tid.includes('plugin') || tid.includes('move') || tid.includes('clear')) {
+              return false;
+            }
+            if (el.closest && el.closest('[role="dialog"], [data-testid="bottom-sheet"]')) {
+              return false;
+            }
+            const aria = cleanText(el.getAttribute('aria-label') || '').toLowerCase();
+            const text = cleanText(el.textContent || '').toLowerCase();
+            if (/^(?:stop(?:\s+(?:generating|generation|response|agent))?|cancel(?:\s+(?:response|generating|generation|\([^)]*\)))?)$/i.test(aria)) {
+              return true;
+            }
+            if (/^(?:stop(?:\s+(?:generating|generation|response|agent))?|cancel(?:\s+(?:response|generating|generation))?)$/i.test(text)) {
+              return true;
+            }
+            return false;
+          }
+
           function detectStreaming() {
             const root = getAppRoot();
-            const stopBtns = collectDeep(root, el => {
-              const tag = (el.tagName || '').toLowerCase();
-              const role = el.getAttribute('role') || '';
-              if (tag !== 'button' && role !== 'button') return false;
-              if (!isVisible(el)) return false;
-              const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
-              return label.includes('stop generating') || label === 'stop' || label.includes('cancel response');
-            }, 15);
-            return stopBtns.length > 0;
+            const directCancel = root.querySelector('[data-testid="input-cancel-button"], [data-testid="send-button-cancel"], [data-testid="webview-agent-cursor-stop-button"]');
+            if (directCancel && isVisible(directCancel)) return true;
+            const inputBox = root.querySelector('[data-testid="agent-input-box"]');
+            if (inputBox) {
+              const btns = inputBox.querySelectorAll('button, [role="button"]');
+              for (let i = 0; i < btns.length; i++) {
+                if (isCancelOrStopButton(btns[i])) return true;
+              }
+              return false;
+            }
+            const stopCandidates = root.querySelectorAll('button[aria-label*="Stop" i], button[aria-label*="Cancel" i]');
+            for (let i = 0; i < stopCandidates.length; i++) {
+              if (isCancelOrStopButton(stopCandidates[i])) return true;
+            }
+            return false;
           }
 
           function detectAuthRequired() {
@@ -1138,6 +1754,7 @@ object AntigravityBridgeScript {
             if (host.includes('accounts.google.') || host.includes('signin.google.') || host.includes('consent.google.')) {
               return true;
             }
+            if (findComposerInput()) return false;
             const signInButtons = collectDeep(getAppRoot(), el => {
               const tag = (el.tagName || '').toLowerCase();
               if (tag !== 'button' && tag !== 'a') return false;
@@ -1145,7 +1762,7 @@ object AntigravityBridgeScript {
               const txt = cleanText(el.textContent).toLowerCase();
               return txt === 'sign in' || txt === 'sign in with google' || txt === 'log in';
             }, 5);
-            return signInButtons.length > 0 && !findComposerInput();
+            return signInButtons.length > 0;
           }
 
           function buildSnapshot() {
@@ -1157,7 +1774,7 @@ object AntigravityBridgeScript {
             const activeProject = parseAriaCurrentValue('[data-testid="project-selector-trigger"]');
             const permissionsPreset = parseAriaCurrentValue('[data-testid="permissions-selector-trigger"]');
             const isStreaming = detectStreaming();
-            const messages = authRequired ? [] : extractMessages();
+            const messages = authRequired ? [] : extractMessages(isStreaming);
             if (isStreaming && messages.length > 0 && messages[messages.length - 1].role === 'assistant') {
               messages[messages.length - 1].isStreaming = true;
             }
@@ -1171,9 +1788,8 @@ object AntigravityBridgeScript {
 
             if (activeModel && cachedModels.length > 0) {
               cachedModels = cachedModels.map(m => {
-                const base = m.name.toLowerCase().replace(/\s*\([^)]+\)\s*$/, '');
-                const selected = activeModel.toLowerCase().startsWith(base);
-                const effortMatch = selected ? activeModel.match(/\b(Low|Medium|High|Extra|Fast)\b/i) : null;
+                const selected = matchesModelBaseName(activeModel, m.name);
+                const effortMatch = selected ? activeModel.match(/\b(Minimal|Low|Medium|High|Extra|Fast)\b/i) : null;
                 return Object.assign({}, m, {
                   isSelected: selected,
                   tier: (effortMatch && effortMatch[1]) ? effortMatch[1] : m.tier
@@ -1208,13 +1824,15 @@ object AntigravityBridgeScript {
 
             const olderBtn = root.querySelector('[data-testid="load-older-messages-button"]');
             const olderText = olderBtn ? cleanText(olderBtn.textContent).toLowerCase() : '';
+            const olderAria = olderBtn ? cleanText(olderBtn.getAttribute('aria-label') || '').toLowerCase() : '';
             const olderStyle = olderBtn ? window.getComputedStyle(olderBtn) : null;
+            const showingMatch = olderAria.match(/showing\s+(\d+)\s+of\s+(\d+)/i);
+            const hasMoreFromCount = showingMatch ? (Number(showingMatch[1]) < Number(showingMatch[2])) : false;
+            const noMoreOlder = /no\s+more/i.test(olderText) || /no\s+more/i.test(olderAria);
             const hasOlderMessages = !!(
               olderBtn &&
-              !olderBtn.disabled &&
-              olderBtn.getAttribute('aria-disabled') !== 'true' &&
-              !/no\s+more/i.test(olderText) &&
-              /load\s+older/i.test(olderText) &&
+              !noMoreOlder &&
+              (hasMoreFromCount || /load\s+older/i.test(olderText) || /load\s+older/i.test(olderAria)) &&
               (!olderStyle || (olderStyle.display !== 'none' && olderStyle.visibility !== 'hidden'))
             );
             const hasSidePanel = !!root.querySelector('[data-testid="mobile-toggle-aux-sidebar"]');
@@ -1241,18 +1859,63 @@ object AntigravityBridgeScript {
             };
           }
 
+          function computeFastDomSig() {
+            const root = getAppRoot();
+            const convView = root.querySelector('[data-testid="conversation-view"]');
+            let convSig = '0';
+            if (convView) {
+              const turns = convView.querySelectorAll('[data-testid="user-message"], [data-testid="agent-response"]');
+              const firstTurn = turns.length > 0 ? turns[0] : null;
+              const firstText = firstTurn ? (firstTurn.textContent || '') : '';
+              const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+              const lastText = lastTurn ? (lastTurn.textContent || '') : '';
+              const expanded = convView.querySelectorAll('[aria-expanded="true"], details[open]').length;
+              const convTextLen = (convView.textContent || '').length;
+              convSig = turns.length + ':' + convTextLen + ':' + expanded + ':' +
+                fastHash(firstText.slice(0, 80)) + ':' +
+                fastHash(lastText.slice(0, 120) + '|' + lastText.slice(-120));
+            }
+            const sidebar = root.querySelector('[data-testid="conversation-list-sidebar"]') || root;
+            const sideRows = sidebar.querySelectorAll('[data-testid="conversation-row-sidebar"]');
+            const sideTextLen = sidebar !== root && sidebar.textContent ? sidebar.textContent.length : 0;
+            const modelBtn = findModelSelectorButton();
+            const activeModel = parseActiveModelName(modelBtn);
+            const activeProject = parseAriaCurrentValue('[data-testid="project-selector-trigger"]');
+            const permissions = parseAriaCurrentValue('[data-testid="permissions-selector-trigger"]');
+            const isStream = detectStreaming() ? '1' : '0';
+            const breadcrumb = root.querySelector('[data-testid="breadcrumb-segment"]');
+            const breadcrumbTxt = breadcrumb ? cleanText(breadcrumb.textContent) : '';
+            const olderBtn = root.querySelector('[data-testid="load-older-messages-button"]');
+            const olderAria = olderBtn ? cleanText(olderBtn.getAttribute('aria-label') || '') : '';
+            const olderFlag = (olderBtn && !olderBtn.disabled ? '1' : '0') + ':' + olderAria;
+            return window.location.href + '|' + isStream + '|' + activeModel + '|' + activeProject + '|' +
+              permissions + '|' + breadcrumbTxt + '|' + olderFlag + '|' + convSig + '|' +
+              sideRows.length + ':' + sideTextLen + '|' + cachedModels.length + ':' +
+              cachedProjects.length + ':' + (cachedQuota.rawSummary || '');
+          }
+
           function syncNow(force) {
-            if (isInternalModalProbe && !force) return;
+            if (!force && (isInternalModalProbe || isPaused || isScrolling)) {
+              if (isPaused || isScrolling) pendingSyncAfterThrottle = true;
+              return;
+            }
+            if (isInternalModalProbe) return;
             if (!force && Date.now() < (store.modelMutationHoldUntil || 0)) return;
             try {
               if (document.getElementById('af-error-container')) {
                 window.location.replace('https://antigravity.google.com/remote');
                 return;
               }
+              const domSig = computeFastDomSig();
+              if (!force && domSig === lastDomSig) {
+                return;
+              }
               const snapshot = buildSnapshot();
               const json = JSON.stringify(snapshot);
-              if (force || json !== lastPayloadHash) {
-                lastPayloadHash = json;
+              const payloadSig = json.length + ':' + fastHash(json);
+              lastDomSig = domSig;
+              if (force || payloadSig !== lastPayloadSig) {
+                lastPayloadSig = payloadSig;
                 if (window.AntigravityNative && window.AntigravityNative.onStateSnapshot) {
                   window.AntigravityNative.onStateSnapshot(json);
                 }
@@ -1266,12 +1929,41 @@ object AntigravityBridgeScript {
 
           function scheduleSync() {
             if (isInternalModalProbe) return;
+            if (isPaused || isScrolling) {
+              pendingSyncAfterThrottle = true;
+              return;
+            }
             if (syncTimer) return;
-            const delay = detectStreaming() ? 380 : 950;
+            const delay = detectStreaming() ? 420 : 1350;
             syncTimer = setTimeout(() => {
               syncTimer = null;
               syncNow(false);
             }, delay);
+          }
+
+          function setPaused(paused) {
+            isPaused = !!paused;
+            if (!isPaused && pendingSyncAfterThrottle) {
+              pendingSyncAfterThrottle = false;
+              scheduleSync();
+            }
+          }
+
+          function setScrolling(scrolling) {
+            isScrolling = !!scrolling;
+            if (scrollResumeTimer) {
+              clearTimeout(scrollResumeTimer);
+              scrollResumeTimer = null;
+            }
+            if (!isScrolling && pendingSyncAfterThrottle && !isPaused) {
+              scrollResumeTimer = setTimeout(() => {
+                scrollResumeTimer = null;
+                if (!isScrolling && pendingSyncAfterThrottle && !isPaused) {
+                  pendingSyncAfterThrottle = false;
+                  scheduleSync();
+                }
+              }, 360);
+            }
           }
 
           function startStreamingHeartbeat() {
@@ -1280,16 +1972,22 @@ object AntigravityBridgeScript {
               streamingHeartbeatTimer = null;
             }
             streamingHeartbeatTicks = 0;
+            let idleAfterStreamTicks = 0;
             streamingHeartbeatTimer = setInterval(() => {
+              if (isPaused || isScrolling) return;
               streamingHeartbeatTicks++;
               syncNow(false);
               if (detectStreaming()) {
+                idleAfterStreamTicks = 0;
                 streamingHeartbeatTicks = Math.min(streamingHeartbeatTicks, 12);
-              } else if (streamingHeartbeatTicks >= 58) {
-                clearInterval(streamingHeartbeatTimer);
-                streamingHeartbeatTimer = null;
+              } else {
+                idleAfterStreamTicks++;
+                if (idleAfterStreamTicks >= 10 || streamingHeartbeatTicks >= 48) {
+                  clearInterval(streamingHeartbeatTimer);
+                  streamingHeartbeatTimer = null;
+                }
               }
-            }, 600);
+            }, 650);
           }
 
           function focusComposer() {
@@ -1461,15 +2159,20 @@ object AntigravityBridgeScript {
           }
 
           function stopGeneration() {
-            const stopBtns = collectDeep(getAppRoot(), el => {
+            const root = getAppRoot();
+            const directCancel = root.querySelector('[data-testid="input-cancel-button"], [data-testid="send-button-cancel"]');
+            if (directCancel && isVisible(directCancel)) {
+              dispatchNativeTap(directCancel) || simulateTap(directCancel);
+              setTimeout(() => syncNow(true), 250);
+              return true;
+            }
+            const stopBtns = collectDeep(root, el => {
               const t = (el.tagName || '').toLowerCase();
               if (t !== 'button' && el.getAttribute('role') !== 'button') return false;
-              if (!isVisible(el)) return false;
-              const label = ((el.getAttribute('aria-label') || '') + ' ' + cleanText(el.textContent)).toLowerCase();
-              return label.includes('stop') || label.includes('cancel');
-            }, 15);
+              return isCancelOrStopButton(el);
+            }, 25);
             if (stopBtns.length > 0) {
-              simulateTap(stopBtns[0]);
+              dispatchNativeTap(stopBtns[0]) || simulateTap(stopBtns[0]);
               setTimeout(() => syncNow(true), 250);
               return true;
             }
@@ -1645,11 +2348,14 @@ object AntigravityBridgeScript {
 
           function isUsageContentReady(el, allowLoose) {
             if (!el) return false;
+            if (el.querySelector && el.querySelector('[data-testid="model-selector-panel"], [data-testid="model-selector-effort-group"], [data-testid="model-selector-effort-option"]')) {
+              return false;
+            }
             const txt = cleanText(el.innerText || el.textContent);
             if (!txt || txt.length < 6) return false;
-            if (/thinking effort|gemini 4 neon.*gemini 4 carbon/i.test(txt)) return false;
-            if (/^\s*(refreshing|loading)\b/i.test(txt) && !/\d{1,3}\s*%/.test(txt)) return false;
-            const hasLoadedQuotaSignal = /(\d{1,3}\s*%|\b(?:5\s*h|weekly|hourly)\s+limit\b|resets?\s+(?:in|at|on)|unlimited)/i.test(txt);
+            if (/thinking effort/i.test(txt)) return false;
+            if (/^\s*(refreshing|loading)\b/i.test(txt) && !/\d{1,3}(?:\.\d+)?\s*%/.test(txt)) return false;
+            const hasLoadedQuotaSignal = /(\d{1,3}(?:\.\d+)?\s*%|\b(?:5\s*h|weekly|hourly)\s+limit\b|resets?\s+(?:in|at|on)|unlimited)/i.test(txt);
             if (hasLoadedQuotaSignal) return true;
             return allowLoose && !/\b(refreshing|loading)\b/i.test(txt) && /(quota|usage|remaining|left|credits|plan)/i.test(txt);
           }
@@ -1842,14 +2548,25 @@ object AntigravityBridgeScript {
             };
 
             const root = getAppRoot();
-            const findFileInput = () =>
-              document.querySelector('[data-testid="agent-input-box"] input[type="file"], input[type="file"]');
+            const findVisibleFileInput = () => {
+              const inputs = Array.from(document.querySelectorAll('[data-testid="agent-input-box"] input[type="file"], input[type="file"]'));
+              return inputs.find(el => {
+                if (!isVisible(el)) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 2 && r.height > 2;
+              }) || null;
+            };
 
-            let fileInput = findFileInput();
-            if (fileInput) {
-              if (!dispatchNativeTap(fileInput)) fileInput.click();
-              reportUpload(true, 'file-input');
+            const visibleFileInput = findVisibleFileInput();
+            if (visibleFileInput && dispatchNativeTap(visibleFileInput)) {
               return true;
+            }
+
+            const directAttach = root.querySelector('[data-testid="chat-composer-attach"]');
+            if (directAttach && isVisible(directAttach) && !directAttach.disabled && directAttach.getAttribute('aria-disabled') !== 'true') {
+              if (dispatchNativeTap(directAttach) || simulateTap(directAttach)) {
+                return true;
+              }
             }
 
             const addBtn = root.querySelector('button[aria-label="Add context"], [data-testid="add-context-button"]') ||
@@ -1873,31 +2590,28 @@ object AntigravityBridgeScript {
               return false;
             }
 
-            // Check if tapping Add context directly spawned <input type="file"> or opened an overlay menu
+            // Check if tapping Add context directly spawned a visible <input type="file"> or opened an overlay menu
             const found = await waitFor(() => {
-              const inp = findFileInput();
+              const inp = findVisibleFileInput();
               if (inp) return { kind: 'input', el: inp };
-              const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="menu"] button, [data-testid="bottom-sheet"] button, button.agy-overlay-item'))
-                .filter(isVisible);
-              const uploadChoice = items.find(b => /upload|file|image|photo|attach|browse/i.test(cleanText(b.textContent) + ' ' + (b.getAttribute('aria-label') || '')));
+              const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="menu"] button, [data-testid="bottom-sheet"] button, button.agy-overlay-item, [role="dialog"] button'))
+                .filter(b => isVisible(b) && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+              const uploadChoice = items.find(b => /upload|file|image|photo|media|attach|browse/i.test(cleanText(b.textContent) + ' ' + (b.getAttribute('aria-label') || '')));
               if (uploadChoice) return { kind: 'menu', el: uploadChoice };
               return null;
-            }, 700, 50);
+            }, 900, 50);
 
             if (found && found.kind === 'input') {
-              found.el.click();
-              reportUpload(true, 'file-input');
+              dispatchNativeTap(found.el) || simulateTap(found.el);
               return true;
             }
             if (found && found.kind === 'menu') {
+              await sleep(100);
               dispatchNativeTap(found.el) || simulateTap(found.el);
-              await sleep(150);
-              const inp2 = findFileInput();
-              if (inp2) inp2.click();
-              reportUpload(true, 'menu-upload');
               return true;
             }
 
+            dismissOverlays();
             reportUpload(false, 'Attachment menu not supported in this view');
             return false;
           }
@@ -1997,11 +2711,23 @@ object AntigravityBridgeScript {
             const root = getAppRoot();
             const btn = root.querySelector('[data-testid="load-older-messages-button"]');
             if (btn) {
+              let scroller = btn.parentElement;
+              while (scroller && scroller !== document.body) {
+                const cs = window.getComputedStyle(scroller);
+                if (scroller.scrollHeight > scroller.clientHeight + 20 && /(auto|scroll)/.test(cs.overflowY || '')) {
+                  scroller.scrollTop = 0;
+                  break;
+                }
+                scroller = scroller.parentElement;
+              }
+              try { btn.click(); } catch (e) {}
               simulateTap(btn);
             }
-            await sleep(750);
+            await sleep(450);
             syncNow(true);
-            setTimeout(() => syncNow(true), 1500);
+            setTimeout(() => syncNow(true), 1000);
+            setTimeout(() => syncNow(true), 1800);
+            setTimeout(() => syncNow(true), 2800);
             return true;
           }
 
@@ -2018,11 +2744,55 @@ object AntigravityBridgeScript {
             if (!wasExpanded) {
               simulateTap(trigger);
               await sleep(280);
-              const sib = el.nextElementSibling;
-              if (sib) {
-                const subBtns = Array.from(sib.querySelectorAll('[data-testid="tool-group-collapsible"][aria-expanded="false"]')).slice(0, 4);
-                subBtns.forEach(sb => simulateTap(sb));
-                if (subBtns.length > 0) await sleep(220);
+            }
+            syncNow(true);
+            return true;
+          }
+
+          async function expandReasoningStep(blockId, sectionId, stepId, stepTitle) {
+            const root = getAppRoot();
+            let reasonEl = null;
+            let scopeRoot = root;
+            if (blockId) {
+              reasonEl = root.querySelector('[data-ag-reason-id="' + blockId.replace(/"/g, '') + '"]');
+              if (reasonEl) {
+                const reasonTrigger = (reasonEl.tagName || '').toLowerCase() === 'button'
+                  ? reasonEl
+                  : (reasonEl.querySelector('summary, button, [role="button"]') || reasonEl);
+                const reasonExpanded = reasonTrigger.getAttribute('aria-expanded') === 'true' || reasonEl.open === true;
+                if (!reasonExpanded) {
+                  simulateTap(reasonTrigger);
+                  await sleep(260);
+                }
+                scopeRoot = getCollapsibleBody(reasonEl) || reasonEl;
+              }
+            }
+            if (sectionId) {
+              const secEl = scopeRoot.querySelector('[data-ag-sec-id="' + sectionId.replace(/"/g, '') + '"]') ||
+                root.querySelector('[data-ag-sec-id="' + sectionId.replace(/"/g, '') + '"]');
+              if (secEl) {
+                const secTrigger = (secEl.tagName || '').toLowerCase() === 'button'
+                  ? secEl
+                  : (secEl.querySelector('summary, button, [role="button"]') || secEl);
+                const secExpanded = secTrigger.getAttribute('aria-expanded') === 'true' || secEl.open === true;
+                if (!secExpanded) {
+                  simulateTap(secTrigger);
+                  await sleep(260);
+                }
+                scopeRoot = getCollapsibleBody(secEl) || scopeRoot;
+              }
+            }
+            if (stepId || stepTitle) {
+              const safeStepId = (stepId || '').replace(/"/g, '');
+              let stepBtn = safeStepId ? scopeRoot.querySelector('[data-ag-step-id="' + safeStepId + '"]') : null;
+              if (!stepBtn && stepTitle) {
+                const targetTitle = stepTitle.toLowerCase();
+                stepBtn = Array.from(scopeRoot.querySelectorAll('button, [role="button"]'))
+                  .find(b => cleanText(b.textContent).toLowerCase().includes(targetTitle));
+              }
+              if (stepBtn && stepBtn.getAttribute('aria-expanded') !== 'true') {
+                simulateTap(stepBtn);
+                await sleep(260);
               }
             }
             syncNow(true);
@@ -2379,7 +3149,7 @@ object AntigravityBridgeScript {
                 const anchor = artMatch.matches('a[href]') ? artMatch : (artMatch.querySelector('a[href]') || artMatch.closest('a[href]'));
                 const href = anchor ? (anchor.getAttribute('href') || '') : '';
                 if (href && /^https?:\/\//i.test(href)) {
-                  sendDoc({ title: targetTitle, markdown: '', raw: '', error: 'EXTERNAL_LINK:' + href });
+                  sendDoc({ title: targetTitle, markdown: '', raw: '', externalUrl: href, error: 'EXTERNAL_LINK:' + href });
                   return false;
                 }
                 const btn = artMatch.querySelector('button') || artMatch;
@@ -2396,6 +3166,12 @@ object AntigravityBridgeScript {
                   return t === lowerTarget || t.endsWith('/' + lowerTarget) || lowerTarget.endsWith('/' + t);
                 });
                 if (pillMatch) {
+                  const anchor = pillMatch.matches('a[href]') ? pillMatch : (pillMatch.querySelector('a[href]') || pillMatch.closest('a[href]'));
+                  const href = anchor ? (anchor.getAttribute('href') || '') : '';
+                  if (href && /^https?:\/\//i.test(href)) {
+                    sendDoc({ title: targetTitle, markdown: '', raw: '', externalUrl: href, error: 'EXTERNAL_LINK:' + href });
+                    return false;
+                  }
                   simulateTap(pillMatch);
                   clicked = true;
                 }
@@ -2420,6 +3196,13 @@ object AntigravityBridgeScript {
                         return t === lowerTarget || t.includes(lowerTarget);
                       });
                     if (artBtn) {
+                      const anchor = artBtn.matches('a[href]') ? artBtn : (artBtn.querySelector('a[href]') || artBtn.closest('a[href]'));
+                      const href = anchor ? (anchor.getAttribute('href') || '') : '';
+                      if (href && /^https?:\/\//i.test(href)) {
+                        closeAuxPanel();
+                        sendDoc({ title: targetTitle, markdown: '', raw: '', externalUrl: href, error: 'EXTERNAL_LINK:' + href });
+                        return false;
+                      }
                       simulateTap(artBtn);
                       clicked = true;
                     } else {
@@ -2507,23 +3290,19 @@ object AntigravityBridgeScript {
                 return !hasSpinner && txt.length > 30 && !/^loading/i.test(txt);
               }, 4500, 100);
 
-              const extractCleanDoc = (foundObj) => {
-                if (!foundObj || !foundObj.docBody) return { md: '', raw: '' };
-                const clone = foundObj.docBody.cloneNode(true);
-                // Always strip embedded <style>/<script>/nav/tablist chrome so CSS never leaks into Raw view
-                clone.querySelectorAll('style, script, noscript, [role="tablist"], nav').forEach(el => {
+              const stripDocumentChrome = (container, stripToolbar) => {
+                if (!container) return;
+                container.querySelectorAll('style, script, noscript, [role="tablist"], nav').forEach(el => {
                   if (el.parentNode) el.parentNode.removeChild(el);
                 });
-                if (foundObj.stripToolbar) {
-                  // Strip the toolbar / breadcrumb bar containing Preview/Raw or file path crumbs
-                  const cloneBtns = Array.from(clone.querySelectorAll('button'));
+                if (stripToolbar) {
+                  const cloneBtns = Array.from(container.querySelectorAll('button, [role="button"]'));
                   const tbAnchor = cloneBtns.find(b => /^(preview|raw)$/i.test(cleanText(b.textContent)));
                   if (tbAnchor) {
                     let tb = tbAnchor.parentElement;
-                    while (tb && tb.parentElement && tb.parentElement !== clone && !tb.querySelector('h1, h2, p, ul, ol, pre, .cm-content')) {
+                    while (tb && tb.parentElement && tb.parentElement !== container && !tb.querySelector('h1, h2, p, ul, ol, pre, .cm-content')) {
                       tb = tb.parentElement;
                     }
-                    // Also remove any sibling header/breadcrumb rows right before tb
                     if (tb && tb.parentNode) {
                       let prev = tb.previousElementSibling;
                       while (prev && !prev.querySelector('h1, h2, p, ul, ol, pre, .cm-content')) {
@@ -2531,16 +3310,74 @@ object AntigravityBridgeScript {
                         prev = prev.previousElementSibling;
                         if (toRemove.parentNode) toRemove.parentNode.removeChild(toRemove);
                       }
-                      if (tb !== clone) tb.parentNode.removeChild(tb);
+                      if (tb !== container) tb.parentNode.removeChild(tb);
                     }
                   }
                 }
-                const mdOut = normalizeMarkdown(nodeToMarkdown(clone, 0));
-                const rawOut = (clone.textContent || '')
+                // Strip leading breadcrumb / duplicate artifact title pill rows preceding the first heading or markdown root
+                const firstHeading = container.querySelector('[data-markdown-root], h1, h2');
+                if (firstHeading) {
+                  let cur = firstHeading;
+                  while (cur && cur.parentElement && cur.parentElement !== container) {
+                    cur = cur.parentElement;
+                  }
+                  let prev = cur ? cur.previousElementSibling : null;
+                  while (prev) {
+                    const toRemove = prev;
+                    prev = prev.previousElementSibling;
+                    const pTxt = cleanText(toRemove.textContent).toLowerCase();
+                    const hasBody = !!toRemove.querySelector('p, ul, ol, pre, table, blockquote, .cm-content');
+                    if (!hasBody && (!pTxt || pTxt === lowerTarget || pTxt.replace(/[^a-z0-9]/g, '') === (lowerTarget + lowerTarget).replace(/[^a-z0-9]/g, '') || pTxt.length <= 64)) {
+                      if (toRemove.parentNode) toRemove.parentNode.removeChild(toRemove);
+                    }
+                  }
+                }
+              };
+
+              const extractRawDocText = (foundObj) => {
+                if (!foundObj || !foundObj.docBody) return '';
+                const liveBody = foundObj.docBody;
+                const ta = liveBody.querySelector('textarea');
+                if (ta && ta.value) return ta.value.replace(/\r/g, '').trim();
+                const cm = liveBody.querySelector('.cm-content');
+                if (cm) {
+                  const cmLines = Array.from(cm.querySelectorAll('.cm-line'));
+                  if (cmLines.length > 0) {
+                    return cmLines.map(ln => (ln.textContent || '').replace(/\u00a0/g, ' ').replace(/\r/g, '')).join('\n').trim();
+                  }
+                  const cmCode = extractCodeText(cm);
+                  if (cmCode) return cmCode;
+                }
+                const clone = liveBody.cloneNode(true);
+                stripDocumentChrome(clone, foundObj.stripToolbar);
+                const pre = clone.querySelector('pre');
+                if (pre && cleanText(pre.textContent).length >= cleanText(clone.textContent).length * 0.65) {
+                  return extractCodeText(pre);
+                }
+                if (liveBody.isConnected && liveBody.innerText && !foundObj.stripToolbar) {
+                  return liveBody.innerText.replace(/\u00a0/g, ' ').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
+                }
+                return (clone.textContent || '')
+                  .replace(/\u00a0/g, ' ')
                   .replace(/\r/g, '')
                   .replace(/\n{3,}/g, '\n\n')
                   .trim();
-                return { md: mdOut, raw: mdOut || rawOut };
+              };
+
+              const extractCleanDoc = (foundObj) => {
+                if (!foundObj || !foundObj.docBody) return { md: '', raw: '' };
+                const clone = foundObj.docBody.cloneNode(true);
+                stripDocumentChrome(clone, foundObj.stripToolbar);
+                const mdRoots = Array.from(clone.querySelectorAll('[data-markdown-root], article, .prose'));
+                const mdTarget = mdRoots.sort((a, b) => cleanText(b.textContent).length - cleanText(a.textContent).length)[0] || clone;
+                let mdOut = normalizeMarkdown(nodeToMarkdown(mdTarget, 0));
+                if (lowerTarget && mdOut) {
+                  const escapedTitle = lowerTarget.replace(/[.*+?^{}()|$[\]\\]/g, '\\$&');
+                  const dupPrefix = new RegExp('^`?' + escapedTitle + '`?\\s*' + escapedTitle + '\\s*', 'i');
+                  mdOut = mdOut.replace(dupPrefix, '').trim();
+                }
+                const rawOut = extractRawDocText(foundObj);
+                return { md: mdOut, raw: rawOut };
               };
 
               const activePanel = findAuxPanelRoot() || panel;
@@ -2552,17 +3389,20 @@ object AntigravityBridgeScript {
                 const initial = extractCleanDoc(found);
                 md = initial.md;
                 rawText = initial.raw;
-                // If Raw toggle button exists, briefly tap Raw to capture exact raw markdown source!
+                // If Raw toggle button exists, tap Raw to capture exact raw markdown source without nodeToMarkdown!
                 if (found.rawBtn) {
                   simulateTap(found.rawBtn);
-                  await sleep(280);
+                  await waitFor(() => {
+                    const p = findAuxPanelRoot() || activePanel;
+                    return p && p.querySelector('.cm-content, textarea, pre');
+                  }, 900, 60);
+                  await sleep(120);
                   const afterRaw = findDocPaneBody(findAuxPanelRoot() || activePanel);
                   if (afterRaw && afterRaw.docBody) {
-                    const rawExtracted = extractCleanDoc(afterRaw);
-                    const candidateRaw = rawExtracted.raw;
+                    const candidateRaw = extractRawDocText(afterRaw);
                     if (candidateRaw.length > 20) {
                       rawText = candidateRaw;
-                      if (!md || md.length < candidateRaw.length * 0.4) {
+                      if (!md) {
                         md = candidateRaw;
                       }
                     }
@@ -2831,6 +3671,8 @@ object AntigravityBridgeScript {
           window.__agBridge = {
             version: BRIDGE_VERSION,
             syncNow: () => syncNow(true),
+            setPaused: setPaused,
+            setScrolling: setScrolling,
             focusComposer: focusComposer,
             submitPromptAfterCommit: submitPromptAfterCommit,
             sendPrompt: sendPrompt,
@@ -2842,6 +3684,7 @@ object AntigravityBridgeScript {
             selectConversation: selectConversation,
             loadOlderMessages: loadOlderMessages,
             expandReasoningBlock: expandReasoningBlock,
+            expandReasoningStep: expandReasoningStep,
             openExternalArtifact: openExternalArtifact,
             openReviewDiffs: openReviewDiffs,
             openDocumentViewer: openDocumentViewer,
@@ -2883,9 +3726,17 @@ object AntigravityBridgeScript {
                 '\n' -> sb.append("\\n")
                 '\r' -> sb.append("\\r")
                 '\t' -> sb.append("\\t")
+                '\b' -> sb.append("\\b")
+                '\u000C' -> sb.append("\\f")
                 '\u2028' -> sb.append("\\u2028")
                 '\u2029' -> sb.append("\\u2029")
-                else -> sb.append(ch)
+                else -> {
+                    if (ch.code < 0x20) {
+                        sb.append("\\u%04x".format(ch.code))
+                    } else {
+                        sb.append(ch)
+                    }
+                }
             }
         }
         return sb.toString()

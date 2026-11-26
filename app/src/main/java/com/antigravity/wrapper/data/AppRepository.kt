@@ -22,6 +22,12 @@ class AppRepository(context: Context) {
     private val dataStore = appContext.antigravityDataStore
     private val fastCache = appContext.getSharedPreferences("antigravity_fast_cache", Context.MODE_PRIVATE)
 
+    @Volatile
+    private var lastSavedConversationsEncoded: String? = null
+
+    @Volatile
+    private var lastSavedQuotaSig: String? = null
+
     fun readCachedProject(): String = fastCache.getString(CACHE_LAST_PROJECT, "").orEmpty()
 
     fun readCachedModel(): String = fastCache.getString(CACHE_LAST_MODEL, "").orEmpty()
@@ -55,6 +61,7 @@ class AppRepository(context: Context) {
                 id = parts[0],
                 title = title,
                 url = parts[2],
+                projectName = parts.getOrNull(4).orEmpty(),
                 updatedLabel = parts[3]
             )
         }
@@ -75,36 +82,62 @@ class AppRepository(context: Context) {
     }
 
     fun saveCachedQuota(quota: QuotaInfo) {
-        val left = quota.headlineLeftPercent ?: return
+        val left = quota.headlineLeftPercent?.coerceIn(0f, 100f) ?: return
+        val fiveH = quota.fiveHourLeftPercent?.coerceIn(0f, 100f)
+        val weekly = quota.weeklyLeftPercent?.coerceIn(0f, 100f)
+        val sig = "$left|${fiveH ?: -1f}|${weekly ?: -1f}|${quota.remainingLabel}|${quota.planLabel}|${quota.fiveHourResetLabel}|${quota.weeklyResetLabel}"
+        if (sig == lastSavedQuotaSig) return
+        lastSavedQuotaSig = sig
+
         val editor = fastCache.edit()
-            .putFloat(CACHE_QUOTA_LEFT, left.coerceIn(0f, 100f))
+            .putFloat(CACHE_QUOTA_LEFT, left)
             .putString(CACHE_QUOTA_REMAINING, quota.remainingLabel)
             .putString(CACHE_QUOTA_PLAN, quota.planLabel)
             .putString(CACHE_QUOTA_5H_RESET, quota.fiveHourResetLabel)
             .putString(CACHE_QUOTA_WEEKLY_RESET, quota.weeklyResetLabel)
-        if (quota.fiveHourLeftPercent != null) {
-            editor.putFloat(CACHE_QUOTA_5H, quota.fiveHourLeftPercent.coerceIn(0f, 100f))
+        if (fiveH != null) {
+            editor.putFloat(CACHE_QUOTA_5H, fiveH)
         }
-        if (quota.weeklyLeftPercent != null) {
-            editor.putFloat(CACHE_QUOTA_WEEKLY, quota.weeklyLeftPercent.coerceIn(0f, 100f))
+        if (weekly != null) {
+            editor.putFloat(CACHE_QUOTA_WEEKLY, weekly)
         }
         editor.apply()
     }
 
     fun saveCachedConversations(conversations: List<ChatConversation>) {
         if (conversations.isEmpty()) return
-        val encoded = conversations.take(40).joinToString("\u001E") { c ->
-            listOf(
-                c.id.replace("\u001F", " ").replace("\u001E", " "),
-                c.title.replace("\u001F", " ").replace("\u001E", " "),
-                c.url.replace("\u001F", " ").replace("\u001E", " "),
-                c.updatedLabel.replace("\u001F", " ").replace("\u001E", " ")
-            ).joinToString("\u001F")
+        val sb = StringBuilder(conversations.size.coerceAtMost(40) * 64)
+        val count = conversations.size.coerceAtMost(40)
+        for (i in 0 until count) {
+            if (i > 0) sb.append('\u001E')
+            val c = conversations[i]
+            appendSanitizedRecordField(sb, c.id)
+            sb.append('\u001F')
+            appendSanitizedRecordField(sb, c.title)
+            sb.append('\u001F')
+            appendSanitizedRecordField(sb, c.url)
+            sb.append('\u001F')
+            appendSanitizedRecordField(sb, c.updatedLabel)
+            sb.append('\u001F')
+            appendSanitizedRecordField(sb, c.projectName)
         }
+        val encoded = sb.toString()
+        if (encoded == lastSavedConversationsEncoded) return
+        val existing = lastSavedConversationsEncoded ?: fastCache.getString(CACHE_CONVERSATIONS, null)
+        lastSavedConversationsEncoded = encoded
+        if (encoded == existing) return
         fastCache.edit().putString(CACHE_CONVERSATIONS, encoded).apply()
     }
 
+    private fun appendSanitizedRecordField(sb: StringBuilder, value: String) {
+        for (ch in value) {
+            sb.append(if (ch == '\u001F' || ch == '\u001E') ' ' else ch)
+        }
+    }
+
     fun clearSessionCache() {
+        lastSavedConversationsEncoded = null
+        lastSavedQuotaSig = null
         fastCache.edit()
             .remove(CACHE_LAST_PROJECT)
             .remove(CACHE_LAST_MODEL)
@@ -122,7 +155,7 @@ class AppRepository(context: Context) {
     val settings: Flow<AppSettings> = dataStore.data.map { prefs ->
         AppSettings(
             themeMode = ThemeMode.fromKey(prefs[KEY_THEME_MODE]),
-            dynamicColor = prefs[KEY_DYNAMIC_COLOR] ?: true,
+            dynamicColor = prefs[KEY_DYNAMIC_COLOR] ?: false,
             fontScalePercent = (prefs[KEY_FONT_SCALE] ?: 100).coerceIn(85, 135),
             hapticFeedbackEnabled = prefs[KEY_HAPTIC_FEEDBACK] ?: true,
             autoExpandReasoning = prefs[KEY_AUTO_EXPAND_REASONING] ?: false,
