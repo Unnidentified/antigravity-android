@@ -1,8 +1,6 @@
 package com.antigravity.wrapper.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -53,18 +51,15 @@ import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -92,27 +87,21 @@ import com.antigravity.wrapper.data.WorkspaceArtifactItem
 import com.antigravity.wrapper.ui.markdown.NativeMarkdownView
 import com.antigravity.wrapper.ui.theme.diffColors
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FileDiffViewerSheet(
     data: DiffReviewData,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val collapsedIds = remember { mutableStateMapOf<String, Boolean>() }
     var wrapLines by remember { mutableStateOf(false) }
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val diffPalette = remember(isDark) { diffColors(isDark) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        tonalElevation = 0.dp,
-        scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
-    ) {
+    FastBottomSheet(
+        onDismiss = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -179,7 +168,7 @@ fun FileDiffViewerSheet(
                     IconButton(onClick = onRefresh, enabled = !data.isLoading) {
                         Icon(Icons.Rounded.Refresh, contentDescription = "Refresh diffs", modifier = Modifier.size(20.dp))
                     }
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = requestDismiss) {
                         Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(20.dp))
                     }
                 }
@@ -467,7 +456,6 @@ private fun DiffFileCard(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DocumentViewerSheet(
     data: DocumentViewerData,
@@ -477,17 +465,12 @@ fun DocumentViewerSheet(
     onLinkClick: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showRaw by remember { mutableStateOf(false) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        tonalElevation = 0.dp,
-        scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
-    ) {
+    FastBottomSheet(
+        onDismiss = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -530,7 +513,7 @@ fun DocumentViewerSheet(
                             Icon(Icons.Rounded.Share, contentDescription = "Share document", modifier = Modifier.size(19.dp))
                         }
                     }
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = requestDismiss) {
                         Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(20.dp))
                     }
                 }
@@ -652,7 +635,6 @@ fun DocumentViewerSheet(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WorkspaceAndActionsSheet(
     conversationTitle: String,
@@ -671,7 +653,6 @@ fun WorkspaceAndActionsSheet(
     onArchiveThread: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showRenameDialog by remember { mutableStateOf(false) }
     val filteredArtifacts = remember(artifacts) {
         artifacts.filterNot { item ->
@@ -687,21 +668,16 @@ fun WorkspaceAndActionsSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        tonalElevation = 0.dp,
-        scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
-    ) {
+    FastBottomSheet(
+        onDismiss = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
-                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -716,7 +692,7 @@ fun WorkspaceAndActionsSheet(
                     style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                IconButton(onClick = onDismiss) {
+                IconButton(onClick = requestDismiss) {
                     Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(20.dp))
                 }
             }
@@ -1031,7 +1007,6 @@ fun WorkspaceAndActionsSheet(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProjectSelectorSheet(
     projects: List<ProjectOption>,
@@ -1039,7 +1014,6 @@ fun ProjectSelectorSheet(
     onSelectProject: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val options = remember(projects, activeProject) {
         val base = projects.toMutableList()
         if (activeProject.isNotBlank() && base.none { it.name.equals(activeProject, ignoreCase = true) }) {
@@ -1051,20 +1025,15 @@ fun ProjectSelectorSheet(
         base
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        tonalElevation = 0.dp,
-        scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
-    ) {
+    FastBottomSheet(
+        onDismiss = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .navigationBarsPadding()
-                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1075,7 +1044,7 @@ fun ProjectSelectorSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("Project", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurface)
-                IconButton(onClick = onDismiss) {
+                IconButton(onClick = requestDismiss) {
                     Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(20.dp))
                 }
             }
@@ -1141,28 +1110,22 @@ fun ProjectSelectorSheet(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PermissionsSelectorSheet(
     currentPreset: String,
     onSelectPreset: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val presets = listOf(
         Triple("Request Review", "Every command requires approval.", Icons.Rounded.Visibility),
         Triple("Default", "Ask before sensitive operations.", Icons.Rounded.Lock),
         Triple("Turbo", "Run all commands without restrictions.", Icons.Rounded.Shield)
     )
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        tonalElevation = 0.dp,
-        scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
-    ) {
+    FastBottomSheet(
+        onDismiss = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1179,7 +1142,7 @@ fun PermissionsSelectorSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("Remote Permissions", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurface)
-                IconButton(onClick = onDismiss) {
+                IconButton(onClick = requestDismiss) {
                     Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(20.dp))
                 }
             }

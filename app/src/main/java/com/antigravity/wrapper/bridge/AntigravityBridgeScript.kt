@@ -17,7 +17,7 @@ object AntigravityBridgeScript {
             window.location.replace('https://antigravity.google.com/remote');
             return;
           }
-          const BRIDGE_VERSION = 24;
+          const BRIDGE_VERSION = 25;
           if (window.__agBridge && window.__agBridge.version === BRIDGE_VERSION) {
             window.__agBridge.syncNow();
             return;
@@ -67,6 +67,7 @@ object AntigravityBridgeScript {
           let scrollResumeTimer = null;
           let pendingSyncAfterThrottle = false;
           let isInternalModalProbe = false;
+          let isRouteTransitioning = false;
           let modelsPrewarmed = store.models.length > 0;
           let quotaPrewarmed = !!store.quota.isLive;
 
@@ -1895,11 +1896,11 @@ object AntigravityBridgeScript {
           }
 
           function syncNow(force) {
-            if (!force && (isInternalModalProbe || isPaused || isScrolling)) {
-              if (isPaused || isScrolling) pendingSyncAfterThrottle = true;
+            if (!force && (isInternalModalProbe || isRouteTransitioning || isPaused || isScrolling)) {
+              if (isPaused || isScrolling || isRouteTransitioning) pendingSyncAfterThrottle = true;
               return;
             }
-            if (isInternalModalProbe) return;
+            if (isInternalModalProbe || isRouteTransitioning) return;
             if (!force && Date.now() < (store.modelMutationHoldUntil || 0)) return;
             try {
               if (document.getElementById('af-error-container')) {
@@ -1928,7 +1929,7 @@ object AntigravityBridgeScript {
           }
 
           function scheduleSync() {
-            if (isInternalModalProbe) return;
+            if (isInternalModalProbe || isRouteTransitioning) return;
             if (isPaused || isScrolling) {
               pendingSyncAfterThrottle = true;
               return;
@@ -2492,22 +2493,26 @@ object AntigravityBridgeScript {
           function clickSidebarRow(url, title) {
             const root = getAppRoot();
             const rows = Array.from(root.querySelectorAll('[data-testid="conversation-row-sidebar"]'));
+            const targetUrl = (url || '').trim().replace(/\/+$/, '');
             const targetTitle = (title || '').trim().toLowerCase();
 
             for (const row of rows) {
               const anchor = row.querySelector('a') || row.querySelector('button');
               if (!anchor) continue;
               const aria = cleanText(anchor.getAttribute('aria-label')).toLowerCase();
+              const fallbackText = cleanText(anchor.textContent).replace(/(\d+\s*(?:s|m|h|d|w|mo|y))$/i, '').trim().toLowerCase();
               const href = anchor.getAttribute('href') || '';
               let fullUrl = '';
-              if (href) {
-                try { fullUrl = new URL(href, window.location.origin).href; } catch (_) {}
+              if (href && !href.startsWith('#')) {
+                try { fullUrl = new URL(href, window.location.origin).href.replace(/\/+$/, ''); } catch (_) {}
               }
-              if ((url && fullUrl === url) || (targetTitle && aria === targetTitle)) {
+              const urlMatch = !!(targetUrl && fullUrl && fullUrl === targetUrl);
+              const titleMatch = !!(targetTitle && (aria === targetTitle || fallbackText === targetTitle));
+              if (urlMatch || titleMatch) {
                 simulateTap(anchor);
-                setTimeout(() => syncNow(true), 350);
-                setTimeout(() => syncNow(true), 950);
-                setTimeout(() => syncNow(true), 1800);
+                setTimeout(() => { if (!isRouteTransitioning) syncNow(true); }, 350);
+                setTimeout(() => { if (!isRouteTransitioning) syncNow(false); }, 950);
+                setTimeout(() => { if (!isRouteTransitioning) syncNow(false); }, 1800);
                 return true;
               }
             }
@@ -2520,14 +2525,19 @@ object AntigravityBridgeScript {
             // Exact mobile back-to-home button discovered from thread DOM snapshot!
             const backBtn = getAppRoot().querySelector('[data-testid="mobile-back-to-home"], button[aria-label="Back to home"]');
             if (backBtn && isVisible(backBtn)) {
-              simulateTap(backBtn);
-              const rowsReady = await waitFor(
-                () => getAppRoot().querySelectorAll('[data-testid="conversation-row-sidebar"]').length > 0,
-                1800,
-                50
-              );
-              if (rowsReady && clickSidebarRow(url, title)) {
-                return true;
+              isRouteTransitioning = true;
+              try {
+                simulateTap(backBtn);
+                const rowsReady = await waitFor(
+                  () => getAppRoot().querySelectorAll('[data-testid="conversation-row-sidebar"]').length > 0,
+                  1800,
+                  50
+                );
+                if (rowsReady && clickSidebarRow(url, title)) {
+                  return true;
+                }
+              } finally {
+                isRouteTransitioning = false;
               }
             }
 
@@ -2535,6 +2545,7 @@ object AntigravityBridgeScript {
               window.location.href = url;
               return true;
             }
+            syncNow(true);
             return false;
           }
 
@@ -2710,6 +2721,7 @@ object AntigravityBridgeScript {
           async function loadOlderMessages() {
             const root = getAppRoot();
             const btn = root.querySelector('[data-testid="load-older-messages-button"]');
+            const beforeSig = computeFastDomSig();
             if (btn) {
               let scroller = btn.parentElement;
               while (scroller && scroller !== document.body) {
@@ -2723,11 +2735,16 @@ object AntigravityBridgeScript {
               try { btn.click(); } catch (e) {}
               simulateTap(btn);
             }
-            await sleep(450);
-            syncNow(true);
-            setTimeout(() => syncNow(true), 1000);
-            setTimeout(() => syncNow(true), 1800);
-            setTimeout(() => syncNow(true), 2800);
+            await sleep(350);
+            await waitFor(() => computeFastDomSig() !== beforeSig, 1400, 80);
+            if (!isScrolling) {
+              syncNow(true);
+            } else {
+              pendingSyncAfterThrottle = true;
+            }
+            setTimeout(() => {
+              if (!isScrolling) syncNow(false);
+            }, 700);
             return true;
           }
 

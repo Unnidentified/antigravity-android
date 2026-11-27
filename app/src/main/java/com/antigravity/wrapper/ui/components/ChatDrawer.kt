@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -38,7 +39,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -69,7 +69,8 @@ fun ChatDrawerSheet(
     onSelectConversation: (ChatConversation) -> Unit,
     onRefreshChats: () -> Unit,
     onOpenQuota: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var collapsedProjects by remember { mutableStateOf(emptySet<String>()) }
@@ -96,14 +97,16 @@ fun ChatDrawerSheet(
     }
     val isSearching = searchQuery.isNotBlank()
 
-    ModalDrawerSheet(
-        drawerContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.width(316.dp)
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        tonalElevation = 1.dp,
+        modifier = modifier.fillMaxHeight()
     ) {
         Column(
             modifier = Modifier
                 .fillMaxHeight()
                 .fillMaxWidth()
+                .statusBarsPadding()
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {

@@ -15,6 +15,7 @@ import com.antigravity.wrapper.data.ModelOption
 import com.antigravity.wrapper.data.QuickPrompt
 import com.antigravity.wrapper.data.ThemeMode
 import com.antigravity.wrapper.data.WorkspaceArtifactItem
+import com.antigravity.wrapper.web.UrlRouter
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -148,9 +149,53 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var switchingFromTitle: String = ""
 
     @Volatile
+    private var switchingFromMessagesSig: String = ""
+
+    @Volatile
     private var switchingUrlChangedAtMs: Long = 0L
 
+    private fun messagesSignature(messages: List<ChatMessage>): String {
+        if (messages.isEmpty()) return ""
+        val first = messages.first()
+        val last = messages.last()
+        return "${messages.size}:${first.id}:${first.markdownContent.take(48)}:${last.id}:${last.markdownContent.take(48)}"
+    }
+
+    private fun isIntermediateHomeUrl(url: String): Boolean {
+        val clean = url.trim().substringBefore('?').substringBefore('#').trimEnd('/').lowercase()
+        return clean == UrlRouter.START_URL.trimEnd('/').lowercase() ||
+            clean == "https://antigravity.google.com/remote"
+    }
+
+    @Volatile
+    private var isListScrolling: Boolean = false
+
+    private var deferredScrollSnapshot: BridgeSnapshot? = null
+
+    fun setListScrolling(scrolling: Boolean) {
+        if (isListScrolling == scrolling) return
+        isListScrolling = scrolling
+        if (!scrolling) {
+            val deferred = deferredScrollSnapshot
+            deferredScrollSnapshot = null
+            if (deferred != null) {
+                onBridgeSnapshot(deferred)
+            }
+        }
+    }
+
     fun onBridgeSnapshot(snapshot: BridgeSnapshot) {
+        val currentState = _uiState.value
+        val shouldDeferDuringScroll = isListScrolling &&
+            !currentState.isSwitchingConversation &&
+            !currentState.isLoadingOlderMessages &&
+            currentState.optimisticMessages.isEmpty() &&
+            !snapshot.authRequired
+        if (shouldDeferDuringScroll) {
+            deferredScrollSnapshot = snapshot
+            return
+        }
+        deferredScrollSnapshot = null
         if (snapshot.activeProject.isNotBlank()) {
             repository.saveCachedProject(snapshot.activeProject)
         }
@@ -196,27 +241,46 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             val fromUrl = current.switchingFromUrl?.trim().orEmpty()
             val incomingUrl = snapshot.currentUrl.trim()
-            val urlChanged = fromUrl.isNotEmpty() && incomingUrl.isNotEmpty() && incomingUrl != fromUrl
             val targetUrl = switchingTargetUrl
-            val reachedTargetUrl = targetUrl.isNotEmpty() && incomingUrl == targetUrl
             val targetTitle = current.switchingTargetTitle.trim()
             val incomingTitle = snapshot.conversationTitle.trim()
+            val incomingMessagesSig = messagesSignature(snapshot.messages)
+            val isTargetSpecific = targetUrl.isNotEmpty() || targetTitle.isNotEmpty()
+            val isIntermediateHome = isTargetSpecific && isIntermediateHomeUrl(incomingUrl)
+
+            val reachedTargetUrl = targetUrl.isNotEmpty() && incomingUrl == targetUrl
             val titleChangedToTarget = targetTitle.isNotEmpty() &&
                 incomingTitle.equals(targetTitle, ignoreCase = true) &&
                 !incomingTitle.equals(switchingFromTitle, ignoreCase = true)
-            val routeChanged = urlChanged || reachedTargetUrl || titleChangedToTarget
-            if (current.isSwitchingConversation && routeChanged && switchingUrlChangedAtMs == 0L) {
+            val urlChangedToNonHome = fromUrl.isNotEmpty() &&
+                incomingUrl.isNotEmpty() &&
+                incomingUrl != fromUrl &&
+                !isIntermediateHome
+
+            val arrivedAtTargetRoute = when {
+                targetUrl.isNotEmpty() -> reachedTargetUrl || (titleChangedToTarget && !isIntermediateHome)
+                targetTitle.isNotEmpty() -> titleChangedToTarget || urlChangedToNonHome
+                else -> urlChangedToNonHome
+            }
+            if (current.isSwitchingConversation && arrivedAtTargetRoute && switchingUrlChangedAtMs == 0L) {
                 switchingUrlChangedAtMs = now
             }
-            val routeSettleElapsed = switchingUrlChangedAtMs > 0L && (now - switchingUrlChangedAtMs) >= 1_400L
-            val arrivedAtNewThread = current.isSwitchingConversation && (
-                (routeChanged && (snapshot.messages.isNotEmpty() || routeSettleElapsed)) ||
-                    (fromUrl.isEmpty() && targetUrl.isEmpty() && snapshot.messages.isNotEmpty())
+            val routeSettleElapsed = switchingUrlChangedAtMs > 0L && (now - switchingUrlChangedAtMs) >= 2_500L
+            val messagesDifferFromSource = switchingFromMessagesSig.isEmpty() ||
+                incomingMessagesSig != switchingFromMessagesSig
+
+            val arrivedAtNewThread = current.isSwitchingConversation && !isIntermediateHome && (
+                (arrivedAtTargetRoute && (
+                    (snapshot.messages.isNotEmpty() && messagesDifferFromSource) ||
+                        routeSettleElapsed
+                    )) ||
+                    (fromUrl.isEmpty() && targetUrl.isEmpty() && snapshot.messages.isNotEmpty() && messagesDifferFromSource)
                 )
             if (arrivedAtNewThread) {
                 shouldCancelSwitchJob = true
                 switchingTargetUrl = ""
                 switchingFromTitle = ""
+                switchingFromMessagesSig = ""
                 switchingUrlChangedAtMs = 0L
             }
             val stillSwitching = if (arrivedAtNewThread) false else current.isSwitchingConversation
@@ -319,6 +383,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onBridgeNavigatingToAuth() {
+        deferredScrollSnapshot = null
         repository.clearSessionCache()
         _uiState.update {
             it.copy(
@@ -332,10 +397,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onBridgeError(description: String?, isOffline: Boolean) {
+        deferredScrollSnapshot = null
         conversationSwitchJob?.cancel()
         loadOlderJob?.cancel()
         switchingTargetUrl = ""
         switchingFromTitle = ""
+        switchingFromMessagesSig = ""
         switchingUrlChangedAtMs = 0L
         _uiState.update {
             it.copy(
@@ -344,6 +411,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 isRefreshingQuota = false,
                 isSwitchingConversation = false,
                 isLoadingOlderMessages = false,
+                workspaceArtifacts = emptyList(),
                 switchingFromUrl = null,
                 switchingTargetTitle = "",
                 errorMessage = description ?: if (isOffline) "No internet connection" else "Unable to connect to Antigravity"
@@ -361,10 +429,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onStartConversationSwitch(targetUrl: String = "", targetTitle: String = "") {
+        deferredScrollSnapshot = null
         conversationSwitchJob?.cancel()
         loadOlderJob?.cancel()
         switchingTargetUrl = targetUrl.trim()
         switchingFromTitle = _uiState.value.snapshot.conversationTitle.trim()
+        switchingFromMessagesSig = messagesSignature(_uiState.value.snapshot.messages)
         switchingUrlChangedAtMs = 0L
         _uiState.update {
             it.copy(
@@ -372,6 +442,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 optimisticModelLabel = null,
                 isSwitchingConversation = true,
                 isLoadingOlderMessages = false,
+                workspaceArtifacts = emptyList(),
                 switchingFromUrl = it.snapshot.currentUrl,
                 switchingTargetTitle = targetTitle.trim()
             )
@@ -382,13 +453,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 delay(250L)
                 val nowMs = System.currentTimeMillis()
                 val routeAt = switchingUrlChangedAtMs
-                val routeSettled = routeAt > 0L && (nowMs - routeAt) >= 1_400L
-                if (routeSettled || (nowMs - startedAt) >= 5_000L) {
+                val routeSettled = routeAt > 0L && (nowMs - routeAt) >= 2_500L
+                if (routeSettled || (nowMs - startedAt) >= 6_500L) {
                     break
                 }
             }
             switchingTargetUrl = ""
             switchingFromTitle = ""
+            switchingFromMessagesSig = ""
             switchingUrlChangedAtMs = 0L
             _uiState.update {
                 it.copy(
@@ -513,10 +585,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startNewChatOptimistic() {
+        deferredScrollSnapshot = null
         conversationSwitchJob?.cancel()
         loadOlderJob?.cancel()
         switchingTargetUrl = ""
         switchingFromTitle = ""
+        switchingFromMessagesSig = ""
         switchingUrlChangedAtMs = 0L
         _composerText.value = ""
         _uiState.update {
@@ -524,9 +598,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 optimisticMessages = emptyList(),
                 isSwitchingConversation = false,
                 isLoadingOlderMessages = false,
+                workspaceArtifacts = emptyList(),
                 switchingFromUrl = null,
                 switchingTargetTitle = "",
                 snapshot = it.snapshot.copy(
+                    currentUrl = "https://antigravity.google.com/remote",
                     conversationTitle = "Antigravity",
                     messages = emptyList(),
                     isStreaming = false,
@@ -570,6 +646,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun setPermissionsSheetOpen(open: Boolean) = _uiState.update { it.copy(isPermissionsSheetOpen = open) }
 
     fun onStartLoadOlderMessages() {
+        deferredScrollSnapshot = null
         loadOlderJob?.cancel()
         val currentMsgs = _uiState.value.snapshot.messages
         loadOlderBaselineCount = currentMsgs.size

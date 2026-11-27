@@ -2,7 +2,6 @@ package com.antigravity.wrapper.ui.components
 
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -80,7 +79,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -94,7 +92,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -150,7 +147,6 @@ internal fun resolveSelectedModel(models: List<ModelOption>, activeModelLabel: S
         ?: models.firstOrNull { matchesActiveModelLabel(it.name, activeModelLabel) }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModelSelectorSheet(
     models: List<ModelOption>,
@@ -160,7 +156,6 @@ fun ModelSelectorSheet(
     onRefreshModels: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val hasExplicitSelection = remember(models) { models.any { it.isSelected } }
     val activeModelObj = remember(models, activeModelLabel) {
         resolveSelectedModel(models, activeModelLabel)
@@ -189,20 +184,15 @@ fun ModelSelectorSheet(
     var selectedEffort by remember(activeEffort) { mutableStateOf(activeEffort) }
     val showEffortBar = activeModelObj == null || activeModelObj.hasEffortLevels
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        tonalElevation = 0.dp,
-        scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
-    ) {
+    FastBottomSheet(
+        onDismiss = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .navigationBarsPadding()
-                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
         ) {
@@ -235,7 +225,7 @@ fun ModelSelectorSheet(
                             )
                         }
                     }
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = requestDismiss) {
                         Icon(
                             imageVector = Icons.Rounded.Close,
                             contentDescription = "Close",
@@ -446,7 +436,6 @@ fun ModelSelectorSheet(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UsageQuotaSheet(
     quota: QuotaInfo,
@@ -458,33 +447,26 @@ fun UsageQuotaSheet(
     onRefresh: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val primaryColor = MaterialTheme.colorScheme.primary
     val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
 
-    // Auto-load usage after sheet open animation finishes so the slide-up stays jank-free
+    // Start syncing immediately if live data isn't already pre-seeded
     LaunchedEffect(Unit) {
         if (!quota.isLiveFromServer && !isRefreshing && bridgeStatus == BridgeStatus.CONNECTED) {
-            delay(220L)
             onRefresh()
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        tonalElevation = 0.dp,
-        scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
-    ) {
+    FastBottomSheet(
+        onDismiss = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
-                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
         ) {
@@ -526,7 +508,7 @@ fun UsageQuotaSheet(
                             )
                         }
                     }
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = requestDismiss) {
                         Icon(
                             imageVector = Icons.Rounded.Close,
                             contentDescription = "Close",
@@ -860,7 +842,6 @@ private fun MetricTile(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun QuickPromptsSheet(
     prompts: List<QuickPrompt>,
@@ -869,23 +850,17 @@ fun QuickPromptsSheet(
     onDeletePrompt: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showAddDialog by remember { mutableStateOf(false) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        tonalElevation = 0.dp,
-        scrimColor = Color.Black.copy(alpha = 0.6f),
-        contentWindowInsets = { WindowInsets(0, 0, 0, 0) }
-    ) {
+    FastBottomSheet(
+        onDismiss = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surfaceContainerLow)
                 .navigationBarsPadding()
-                .animateContentSize(animationSpec = tween(durationMillis = 200))
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
         ) {
@@ -909,7 +884,7 @@ fun QuickPromptsSheet(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("New")
                     }
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = requestDismiss) {
                         Icon(Icons.Rounded.Close, contentDescription = "Close", modifier = Modifier.size(20.dp))
                     }
                 }

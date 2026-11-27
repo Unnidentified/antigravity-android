@@ -44,6 +44,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -74,9 +75,9 @@ private data class HighlightCacheKey(
     val isDark: Boolean
 )
 
-private val highlightCache = object : LinkedHashMap<HighlightCacheKey, AnnotatedString>(64, 0.75f, true) {
+private val highlightCache = object : LinkedHashMap<HighlightCacheKey, AnnotatedString>(128, 0.75f, true) {
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<HighlightCacheKey, AnnotatedString>?): Boolean {
-        return size > 64
+        return size > 128
     }
 }
 
@@ -133,7 +134,7 @@ private class TextLayoutHolder {
 }
 
 @Immutable
-private data class MarkdownRenderStyles(
+data class MarkdownRenderStyles(
     val isDark: Boolean,
     val primaryColor: Color,
     val codeBg: Color,
@@ -154,20 +155,17 @@ private data class MarkdownRenderStyles(
     val tableCellStyle: TextStyle
 )
 
+@Immutable
+data class MarkdownBlockChunk(
+    val blocks: List<MarkdownBlock>
+)
+
 @Composable
-fun NativeMarkdownView(
-    markdown: String,
-    fontScale: Float = 1f,
-    onCopyCode: (String) -> Unit,
-    onLinkClick: (String) -> Unit,
-    modifier: Modifier = Modifier,
-    enableSelection: Boolean = true
-) {
-    val blocks = remember(markdown) { MarkdownParser.parse(markdown) }
+fun rememberMarkdownRenderStyles(fontScale: Float = 1f): MarkdownRenderStyles {
     val colorScheme = MaterialTheme.colorScheme
     val typography = MaterialTheme.typography
     val isDark = remember(colorScheme.background) { colorScheme.background.luminance() < 0.5f }
-    val styles = remember(colorScheme, typography, fontScale, isDark) {
+    return remember(colorScheme, typography, fontScale, isDark) {
         val codeBg = if (isDark) colorScheme.surfaceContainerHighest else colorScheme.surfaceContainerHigh
         val baseParagraph = typography.bodyLarge.copy(
             fontSize = 15.sp * fontScale,
@@ -222,7 +220,41 @@ fun NativeMarkdownView(
             )
         )
     }
+}
 
+@Composable
+fun NativeMarkdownView(
+    markdown: String,
+    fontScale: Float = 1f,
+    onCopyCode: (String) -> Unit,
+    onLinkClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    enableSelection: Boolean = true
+) {
+    val blocks = remember(markdown) { MarkdownParser.parse(markdown) }
+    val styles = rememberMarkdownRenderStyles(fontScale)
+    NativeMarkdownChunkView(
+        chunk = remember(blocks) { MarkdownBlockChunk(blocks) },
+        fontScale = fontScale,
+        styles = styles,
+        onCopyCode = onCopyCode,
+        onLinkClick = onLinkClick,
+        modifier = modifier,
+        enableSelection = enableSelection
+    )
+}
+
+@Composable
+fun NativeMarkdownChunkView(
+    chunk: MarkdownBlockChunk,
+    fontScale: Float = 1f,
+    styles: MarkdownRenderStyles = rememberMarkdownRenderStyles(fontScale),
+    onCopyCode: (String) -> Unit,
+    onLinkClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    enableSelection: Boolean = true
+) {
+    val blocks = chunk.blocks
     val content: @Composable () -> Unit = {
         Column(
             modifier = if (enableSelection) Modifier.fillMaxWidth() else modifier.fillMaxWidth(),
@@ -246,6 +278,123 @@ fun NativeMarkdownView(
         }
     } else {
         content()
+    }
+}
+
+@Composable
+fun NativeBlockQuoteSliceView(
+    chunk: MarkdownBlockChunk,
+    isQuoteStart: Boolean,
+    isQuoteEnd: Boolean,
+    fontScale: Float = 1f,
+    styles: MarkdownRenderStyles = rememberMarkdownRenderStyles(fontScale),
+    onCopyCode: (String) -> Unit,
+    onLinkClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    enableSelection: Boolean = true
+) {
+    val accentColor = styles.primaryColor
+    val sliceShape = remember(isQuoteStart, isQuoteEnd) {
+        when {
+            isQuoteStart && isQuoteEnd -> BLOCKQUOTE_SHAPE
+            isQuoteStart -> RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)
+            isQuoteEnd -> RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp)
+            else -> RectangleShape
+        }
+    }
+    val innerTopPad = if (isQuoteStart) 10.dp else 3.dp
+    val innerBottomPad = if (isQuoteEnd) 10.dp else 3.dp
+
+    val sliceBody: @Composable () -> Unit = {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(sliceShape)
+                .background(styles.blockquoteBg)
+                .drawBehind {
+                    drawRect(
+                        color = accentColor,
+                        topLeft = Offset.Zero,
+                        size = Size(4.dp.toPx(), size.height)
+                    )
+                }
+                .padding(start = 16.dp, end = 12.dp, top = innerTopPad, bottom = innerBottomPad),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            val blocks = chunk.blocks
+            for (i in blocks.indices) {
+                RenderMarkdownBlock(
+                    block = blocks[i],
+                    fontScale = fontScale,
+                    styles = styles,
+                    onCopyCode = onCopyCode,
+                    onLinkClick = onLinkClick
+                )
+            }
+        }
+    }
+
+    if (enableSelection) {
+        SelectionContainer(modifier = modifier.fillMaxWidth()) {
+            sliceBody()
+        }
+    } else {
+        Box(modifier = modifier.fillMaxWidth()) {
+            sliceBody()
+        }
+    }
+}
+
+@Composable
+fun NativeStandaloneCodeBlock(
+    language: String,
+    code: String,
+    fontScale: Float = 1f,
+    styles: MarkdownRenderStyles = rememberMarkdownRenderStyles(fontScale),
+    onCopyCode: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier.fillMaxWidth()) {
+        NativeCodeBlockCard(
+            language = language,
+            code = code,
+            styles = styles,
+            onCopy = { onCopyCode(code) }
+        )
+    }
+}
+
+@Composable
+fun NativeStandaloneMathBlock(
+    latex: String,
+    fontScale: Float = 1f,
+    onCopyCode: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier.fillMaxWidth()) {
+        NativeLatexDisplayCard(
+            latex = latex,
+            fontScale = fontScale,
+            onCopy = { onCopyCode(latex) }
+        )
+    }
+}
+
+@Composable
+fun NativeStandaloneTableBlock(
+    table: MarkdownBlock.TableBlock,
+    fontScale: Float = 1f,
+    styles: MarkdownRenderStyles = rememberMarkdownRenderStyles(fontScale),
+    onLinkClick: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier.fillMaxWidth()) {
+        NativeMarkdownTable(
+            headers = table.headers,
+            rows = table.rows,
+            styles = styles,
+            onLinkClick = onLinkClick
+        )
     }
 }
 

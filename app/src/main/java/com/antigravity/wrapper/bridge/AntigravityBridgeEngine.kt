@@ -74,6 +74,11 @@ class AntigravityBridgeEngine(
     @Volatile
     private var isNativeScrolling: Boolean = false
 
+    @Volatile
+    private var allowDeliverDuringScroll: Boolean = false
+
+    private var pendingSnapshotDuringScroll: BridgeSnapshot? = null
+
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface", "ClickableViewAccessibility")
     fun configureWebView(
         view: WebView,
@@ -187,8 +192,9 @@ class AntigravityBridgeEngine(
     }
 
     fun syncNow() {
+        allowDeliverDuringScroll = true
         webView?.evaluateJavascript(
-            "window.__agBridge ? window.__agBridge.syncNow() : null;",
+            "window.__agBridge ? window.__agBridge.syncNow(true) : null;",
             null
         )
     }
@@ -199,6 +205,7 @@ class AntigravityBridgeEngine(
             onResult(false, "Session not ready")
             return
         }
+        allowDeliverDuringScroll = true
         pendingSendCallback = onResult
 
         // Briefly unlock DOM focus so Chromium's InputConnection + Lexical accept trusted input
@@ -257,6 +264,7 @@ class AntigravityBridgeEngine(
     }
 
     fun selectModel(modelName: String, effortTier: String = "") {
+        allowDeliverDuringScroll = true
         val escapedModel = AntigravityBridgeScript.escapeJsString(modelName)
         val escapedTier = AntigravityBridgeScript.escapeJsString(effortTier)
         webView?.evaluateJavascript(
@@ -273,6 +281,7 @@ class AntigravityBridgeEngine(
     }
 
     fun startNewChat() {
+        allowDeliverDuringScroll = true
         webView?.evaluateJavascript(
             "window.__agBridge ? window.__agBridge.startNewChat() : (window.location.href='${UrlRouter.START_URL}');",
             null
@@ -280,6 +289,7 @@ class AntigravityBridgeEngine(
     }
 
     fun selectConversation(url: String, title: String) {
+        allowDeliverDuringScroll = true
         val escapedUrl = AntigravityBridgeScript.escapeJsString(url)
         val escapedTitle = AntigravityBridgeScript.escapeJsString(title)
         webView?.evaluateJavascript(
@@ -289,6 +299,7 @@ class AntigravityBridgeEngine(
     }
 
     fun loadOlderMessages() {
+        allowDeliverDuringScroll = true
         webView?.evaluateJavascript(
             "window.__agBridge && window.__agBridge.loadOlderMessages();",
             null
@@ -599,6 +610,13 @@ class AntigravityBridgeEngine(
             "window.__agBridge && window.__agBridge.setScrolling && window.__agBridge.setScrolling($flag);",
             null
         )
+        if (!scrolling) {
+            val deferred = pendingSnapshotDuringScroll
+            pendingSnapshotDuringScroll = null
+            if (deferred != null && !isDestroyed) {
+                onSnapshotReceived(deferred)
+            }
+        }
     }
 
     fun onResume() {
@@ -695,7 +713,15 @@ class AntigravityBridgeEngine(
                     if (snapshot == lastDeliveredSnapshot) continue
                     lastDeliveredSnapshot = snapshot
                     mainHandler.post {
-                        if (!isDestroyed) {
+                        if (isDestroyed) return@post
+                        val bypassScroll = allowDeliverDuringScroll
+                        if (bypassScroll) {
+                            allowDeliverDuringScroll = false
+                        }
+                        if (isNativeScrolling && !bypassScroll && !snapshot.authRequired) {
+                            pendingSnapshotDuringScroll = snapshot
+                        } else {
+                            pendingSnapshotDuringScroll = null
                             onSnapshotReceived(snapshot)
                         }
                     }

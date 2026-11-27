@@ -55,9 +55,9 @@ object MarkdownParser {
 
     private val ESCAPABLE_CHARS = charArrayOf('$', '*', '_', '`', '[', ']', '\\')
 
-    private val parseCache = object : LinkedHashMap<String, List<MarkdownBlock>>(192, 0.75f, true) {
+    private val parseCache = object : LinkedHashMap<String, List<MarkdownBlock>>(256, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<MarkdownBlock>>?): Boolean {
-            return size > 192
+            return size > 256
         }
     }
 
